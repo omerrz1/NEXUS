@@ -1,6 +1,6 @@
 """Non-interactive single-prompt execution mode for Nexus."""
 
-from nexus.brain.base import Brain
+from nexus.brain.base import Brain, Depth
 from nexus.cli.render import CliRenderer
 from nexus.messages import Message
 
@@ -9,6 +9,7 @@ def run_oneshot(
     prompt: str,
     brain: Brain,
     renderer: CliRenderer | None = None,
+    depth: Depth = Depth.BALANCED,
 ) -> int:
     """Execute a single prompt non-interactively and stream the output."""
     out = renderer or CliRenderer()
@@ -23,6 +24,7 @@ def run_oneshot(
             messages,
             on_delta=out.print_chunk,
             on_reasoning=out.print_reasoning_chunk,
+            depth=depth,
         )
         out.end_stream()
         if reply.tool_calls:

@@ -5,6 +5,7 @@ import json
 import httpx
 import pytest
 
+from nexus.brain.base import Depth
 from nexus.brain.openai_compat import OpenAIBrain, is_loopback_url
 from nexus.messages import Message, ToolSpec
 
@@ -112,3 +113,21 @@ def test_openai_brain_server_error() -> None:
 
     with pytest.raises(RuntimeError, match="Model server error"):
         brain.chat([Message.user("Hello")])
+
+
+@pytest.mark.parametrize(
+    ("depth", "expected_effort"),
+    [(Depth.FAST, "none"), (Depth.BALANCED, None), (Depth.DEEP, "high")],
+)
+def test_depth_sets_reasoning_effort(depth: Depth, expected_effort: str | None) -> None:
+    sent: dict[str, object] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        sent.update(json.loads(request.read()))
+        return httpx.Response(200, json={"choices": [{"message": {"content": "ok"}}]})
+
+    client = httpx.Client(transport=httpx.MockTransport(handler))
+    brain = OpenAIBrain(base_url="http://127.0.0.1:11434/v1", client=client)
+    brain.chat([Message.user("Hi")], depth=depth)
+
+    assert sent.get("reasoning_effort") == expected_effort

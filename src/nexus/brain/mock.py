@@ -2,7 +2,7 @@
 
 from collections.abc import Callable
 
-from nexus.brain.base import BrainReply
+from nexus.brain.base import BrainReply, Depth
 from nexus.messages import Message, ToolCall, ToolSpec, Usage
 
 
@@ -19,6 +19,7 @@ class MockBrain:
         self._context_window: int = context_window
         self._responder: Callable[[list[Message]], BrainReply] | None = responder
         self.calls: list[tuple[list[Message], list[ToolSpec] | None]] = []
+        self.depths: list[Depth] = []
 
     @property
     def context_window(self) -> int:
@@ -41,9 +42,11 @@ class MockBrain:
         tools: list[ToolSpec] | None = None,
         on_delta: Callable[[str], None] | None = None,
         on_reasoning: Callable[[str], None] | None = None,
+        depth: Depth = Depth.BALANCED,
     ) -> BrainReply:
         """Record the call and return the next scripted or generated reply."""
         self.calls.append((list(messages), list(tools) if tools is not None else None))
+        self.depths.append(depth)
 
         if self._responder is not None:
             reply = self._responder(messages)

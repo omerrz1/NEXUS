@@ -2,14 +2,19 @@
 
 import argparse
 import sys
+from dataclasses import replace
 
 from rich.console import Console
 
 import nexus
+from nexus.brain.base import Depth
 from nexus.brain.openai_compat import OpenAIBrain
 from nexus.cli.doctor import run_doctor
 from nexus.cli.oneshot import run_oneshot
 from nexus.cli.repl import run_repl
+from nexus.cli.settings import SETTINGS_PATH, Settings, load_settings
+from nexus.guardrails.modes import Mode
+from nexus.tools.registry import default_registry
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
@@ -33,10 +38,18 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     )
     parser.add_argument(
         "--mode",
-        type=str,
-        choices=["read-only", "ask", "auto"],
-        default="ask",
-        help="Security mode (read-only, ask, auto).",
+        type=Mode,
+        choices=list(Mode),
+        default=None,
+        help="Permission mode (read-only, ask, auto). Defaults to your saved setting.",
+    )
+    parser.add_argument(
+        "--depth",
+        type=Depth,
+        choices=list(Depth),
+        default=None,
+        help="How long the model thinks before answering: fast (no thinking), "
+        "balanced (model default), deep (slowest). Defaults to your saved setting.",
     )
     parser.add_argument(
         "--no-anim", action="store_true", help="Disable the animated startup banner."
@@ -67,17 +80,29 @@ def main(argv: list[str] | None = None) -> None:
         console.print(f"[bold red]Configuration error:[/bold red] {err}")
         sys.exit(1)
 
+    settings = _apply_flags(load_settings(), args)
     if args.prompt is not None:
-        code = run_oneshot(args.prompt, brain)
+        code = run_oneshot(args.prompt, brain, depth=settings.depth)
         sys.exit(code)
 
     run_repl(
         brain=brain,
+        tools=default_registry(),
+        settings=settings,
+        settings_path=SETTINGS_PATH,
         model_name=args.model,
         base_url=args.base_url,
-        mode=args.mode,
         animate_banner=not args.no_anim,
         console=console,
+    )
+
+
+def _apply_flags(saved: Settings, args: argparse.Namespace) -> Settings:
+    """Command-line flags win over saved settings, but only for this run."""
+    return replace(
+        saved,
+        mode=args.mode or saved.mode,
+        depth=args.depth or saved.depth,
     )
 
 

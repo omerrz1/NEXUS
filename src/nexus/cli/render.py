@@ -1,14 +1,19 @@
-"""Terminal rendering engine with blue-themed styling, ASCII banners, and animated loading."""
+"""Terminal rendering: the animated banner, the welcome card, and message cards."""
 
+import json
 import time
+from pathlib import Path
 from typing import Any
 
 from rich.console import Console, Group
 from rich.live import Live
-from rich.markdown import Markdown
 from rich.panel import Panel
 from rich.syntax import Syntax
+from rich.table import Table
 from rich.text import Text
+
+from nexus.cli.stream import TurnView
+from nexus.cli.theme import CYAN, ERROR, GLOW, MUTED, OCEAN, SKY, blend, gradient_at
 
 _NEXUS_ASCII_ART: tuple[str, ...] = (
     r" ███╗   ██╗███████╗██╗  ██╗██╗   ██╗███████╗",
@@ -18,251 +23,168 @@ _NEXUS_ASCII_ART: tuple[str, ...] = (
     r" ██║ ╚████║███████╗██╔╝ ██╗╚██████╔╝███████║",
     r" ╚═╝  ╚═══╝╚══════╝╚═╝  ╚═╝ ╚═════╝ ╚══════╝",
 )
+_TAGLINE = "local-first terminal coding agent"
+_ART_WIDTH = max(len(line) for line in _NEXUS_ASCII_ART)
+_FRAME_SECONDS = 1 / 60
 
-_BLUE_GRADIENT: tuple[str, ...] = (
-    "#70d6ff",
-    "#00b4d8",
-    "#0096c7",
-    "#0077b6",
-    "#1e90ff",
-    "#4361ee",
-)
 
-_SPINNER_FRAMES: tuple[str, ...] = ("⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏")
+def _banner_frame(revealed: float, glow_at: float | None) -> Group:
+    """One banner frame: columns up to `revealed` are drawn; `glow_at` is a light band."""
+    lines: list[Text] = []
+    for row, line in enumerate(_NEXUS_ASCII_ART):
+        text = Text()
+        for column, char in enumerate(line):
+            # Rows are offset so the reveal edge is diagonal, which reads as motion.
+            if column > revealed - row * 1.5:
+                text.append(" ")
+                continue
+            color = gradient_at((column + row * 2) / (_ART_WIDTH + 12))
+            if glow_at is not None:
+                color = blend(color, GLOW, 1 - abs(column + row - glow_at) / 5)
+            text.append(char, style=f"bold {color}")
+        lines.append(text)
+    tagline = Text(f"  {_TAGLINE}", style=f"italic {MUTED}")
+    return Group(*lines, tagline, Text())
 
 
 class CliRenderer:
-    """Handles terminal formatting, animations, status HUDs, and message rendering."""
+    """Everything the REPL shows, apart from the input line."""
 
     def __init__(self, console: Console | None = None) -> None:
         self.console: Console = console or Console()
-        self._is_streaming: bool = False
-        self._in_reasoning: bool = False
-        self._header_printed: bool = False
         self.show_raw_thoughts: bool = False
         self.last_reasoning_trace: str = ""
-
-        self._reasoning_start: float = 0.0
-        self._reasoning_tokens: int = 0
-        self._reasoning_buffer: list[str] = []
-        self._spinner_idx: int = 0
-        self._last_spinner_update: float = 0.0
-        self._turn_start: float = 0.0
-        self._turn_tokens: int = 0
+        self._turn: TurnView | None = None
 
     def print_banner(self, animate: bool = True) -> None:
-        """Render the animated glowing blue NEXUS ASCII banner."""
+        """Draw the banner: a diagonal wipe in, then a light sweep across the letters."""
         if not animate or not self.console.is_terminal:
-            self._print_static_banner()
+            self.console.print(_banner_frame(revealed=_ART_WIDTH * 3, glow_at=None))
             return
 
-        with Live(console=self.console, refresh_per_second=20, transient=False) as live:
-            accumulated: list[Text] = []
-            for i, line in enumerate(_NEXUS_ASCII_ART):
-                color = _BLUE_GRADIENT[i % len(_BLUE_GRADIENT)]
-                text = Text(line, style=f"bold {color}")
-                accumulated.append(text)
-                live.update(Group(*accumulated))
-                time.sleep(0.04)
-
-            for step in range(3):
-                shimmer_group: list[Text] = []
-                for i, line in enumerate(_NEXUS_ASCII_ART):
-                    color = _BLUE_GRADIENT[(i + step) % len(_BLUE_GRADIENT)]
-                    shimmer_group.append(Text(line, style=f"bold {color}"))
-                live.update(Group(*shimmer_group))
-                time.sleep(0.06)
-
-            subtitle = Text(
-                "─── LOCAL-FIRST TERMINAL CODING AGENT ───",
-                style="bold deep_sky_blue1 justify-center",
-            )
-            live.update(Group(*accumulated, Text(""), subtitle, Text("")))
-
-    def _print_static_banner(self) -> None:
-        """Render static banner without delay."""
-        banner_lines: list[Text] = []
-        for i, line in enumerate(_NEXUS_ASCII_ART):
-            color = _BLUE_GRADIENT[i % len(_BLUE_GRADIENT)]
-            banner_lines.append(Text(line, style=f"bold {color}"))
-        banner_lines.append(Text(""))
-        banner_lines.append(
-            Text("─── LOCAL-FIRST TERMINAL CODING AGENT ───", style="bold deep_sky_blue1")
-        )
-        self.console.print(Group(*banner_lines))
+        with Live(console=self.console, refresh_per_second=60, transient=False) as live:
+            for step in range(36):
+                live.update(_banner_frame(revealed=step * 2.0, glow_at=None), refresh=True)
+                time.sleep(_FRAME_SECONDS)
+            for step in range(30):
+                glow = -6 + step * (_ART_WIDTH + 12) / 30
+                live.update(_banner_frame(revealed=_ART_WIDTH * 3, glow_at=glow), refresh=True)
+                time.sleep(_FRAME_SECONDS)
+            live.update(_banner_frame(revealed=_ART_WIDTH * 3, glow_at=None), refresh=True)
 
     def print_hud(
         self,
         model: str,
         base_url: str,
         mode: str = "ask",
+        depth: str = "balanced",
         tokens: int = 0,
         speed: float = 0.0,
+        context_window: int = 4096,
     ) -> None:
-        """Render a sleek high-tech blue dashboard showing system parameters."""
-        speed_str = f"{speed:.1f} tok/s" if speed > 0 else "idle"
-        line1 = (
-            f"[bold #70d6ff]◈ MODEL:[/bold #70d6ff] [white]{model}[/white]   "
-            f"[bold #00b4d8]⚡ RUNTIME:[/bold #00b4d8] [white]{base_url}[/white]   "
-            f"[bold #1e90ff]🔒 MODE:[/bold #1e90ff] [cyan]{mode}[/cyan]"
+        """Show the session's settings in a compact card."""
+        grid = Table.grid(padding=(0, 2))
+        grid.add_column(style=MUTED, justify="right")
+        grid.add_column(style=f"bold {SKY}")
+        grid.add_column(style=MUTED, justify="right")
+        grid.add_column(style=f"bold {SKY}")
+        speed_text = f"{speed:.1f} tok/s" if speed > 0 else "idle"
+        grid.add_row("model", model, "mode", mode)
+        grid.add_row("server", base_url, "depth", depth)
+        grid.add_row(
+            "context", f"{context_window:,} tok", "session", f"{tokens} tok · {speed_text}"
         )
-        line2 = (
-            "[bold #0077b6]📊 CTX:[/bold #0077b6] [white]4,096 tok[/white]   "
-            f"[bold #0096c7]⚡ SPEED:[/bold #0096c7] [white]{speed_str}[/white]   "
-            f"[bold #4361ee]💬 SESSION:[/bold #4361ee] [white]{tokens} tok[/white]"
-        )
-        panel = Panel(
-            f"{line1}\n{line2}",
-            border_style="#0096c7",
-            padding=(0, 2),
-            title="[bold #70d6ff]NEXUS AGENT HUD[/bold #70d6ff]",
-            title_align="left",
-        )
-        self.console.print(panel)
+        grid.add_row("folder", _short_path(Path.cwd()), "", "")
+        self.console.print(Panel(grid, border_style=OCEAN, padding=(0, 1), expand=False))
+
+    def print_tips(self) -> None:
+        """Show the handful of shortcuts a new user needs."""
+        tips = Text("  ")
+        for key, action in (("/", "commands"), ("@", "files"), ("⇧⇥", "mode"), ("^T", "depth")):
+            tips.append(key, style=f"bold {CYAN}")
+            tips.append(f" {action}   ", style=MUTED)
+        tips.append("ctrl-d", style=f"bold {CYAN}")
+        tips.append(" exit", style=MUTED)
+        self.console.print(tips)
+        self.console.print()
 
     def start_stream(self) -> None:
-        """Prepare console for streaming token outputs."""
-        self._is_streaming = True
-        self._in_reasoning = False
-        self._header_printed = False
-        self._reasoning_tokens = 0
-        self._reasoning_buffer = []
-        self._turn_tokens = 0
-        self._turn_start = time.perf_counter()
-        self.console.print()
+        """Begin showing a new model turn."""
+        self._turn = TurnView(self.console, show_thinking=self.show_raw_thoughts)
+        self._turn.start()
 
     def print_reasoning_chunk(self, chunk: str) -> None:
-        """Process reasoning chunks with animated loading spinner or verbose output."""
-        self._reasoning_buffer.append(chunk)
-        self._reasoning_tokens += 1
-        self._turn_tokens += 1
-
-        if self.show_raw_thoughts:
-            if not self._in_reasoning:
-                self._in_reasoning = True
-                self.console.print("[dim #0077b6]Thinking[/dim #0077b6] [dim]›[/dim] ", end="")
-            self.console.file.write(chunk)
-            self.console.file.flush()
-            return
-
-        now = time.perf_counter()
-        if not self._in_reasoning:
-            self._in_reasoning = True
-            self._reasoning_start = now
-            self._last_spinner_update = now
-
-        is_tty = bool(
-            self.console.is_terminal and getattr(self.console.file, "isatty", lambda: False)()
-        )
-        if is_tty and (now - self._last_spinner_update >= 0.08):
-            self._last_spinner_update = now
-            frame = _SPINNER_FRAMES[self._spinner_idx % len(_SPINNER_FRAMES)]
-            self._spinner_idx += 1
-            elapsed = now - self._reasoning_start
-            anim_text = (
-                f"\r  \033[38;2;0;212;255m{frame}\033[0m "
-                f"\033[1;38;2;0;180;216mThinking...\033[0m "
-                f"\033[2;38;2;112;214;255m({elapsed:.1f}s • {self._reasoning_tokens} tok)\033[0m   "
-            )
-            self.console.file.write(anim_text)
-            self.console.file.flush()
+        """Feed a piece of the model's reasoning to the live view."""
+        if self._turn is not None:
+            self._turn.add_reasoning(chunk)
 
     def print_chunk(self, chunk: str) -> None:
-        """Print a streaming token delta to console output."""
-        is_tty = bool(
-            self.console.is_terminal and getattr(self.console.file, "isatty", lambda: False)()
-        )
-        if self._in_reasoning:
-            self._in_reasoning = False
-            elapsed = max(0.1, time.perf_counter() - self._reasoning_start)
-            if not self.show_raw_thoughts:
-                if is_tty:
-                    self.console.file.write("\r\033[K")
-                self.console.print(
-                    f"  [dim #0077b6]╭─[/dim #0077b6] "
-                    f"[cyan]✔ Thought for {elapsed:.1f}s[/cyan] "
-                    f"[dim]({self._reasoning_tokens} tokens)[/dim]"
-                )
-            self.console.print("[bold #00b4d8]Nexus[/bold #00b4d8] [cyan]›[/cyan] ", end="")
-            self._header_printed = True
-        elif not self._header_printed:
-            self.console.print("[bold #00b4d8]Nexus[/bold #00b4d8] [cyan]›[/cyan] ", end="")
-            self._header_printed = True
-
-        self.console.file.write(chunk)
-        self.console.file.flush()
-        self._turn_tokens += 1
+        """Feed a piece of the model's answer to the live view."""
+        if self._turn is not None:
+            self._turn.add_answer(chunk)
 
     def end_stream(self) -> float:
-        """Conclude the streaming output and display turn telemetry speed."""
-        self.last_reasoning_trace = "".join(self._reasoning_buffer)
-        if self._in_reasoning and self.console.is_terminal and not self.show_raw_thoughts:
-            self.console.file.write("\r\033[K")
-
-        elapsed = max(0.01, time.perf_counter() - self._turn_start)
-        speed = self._turn_tokens / elapsed
-
-        if self._header_printed:
-            self.console.print()
-            self.console.print(
-                f"  [dim #0077b6]╰─[/dim #0077b6] "
-                f"[dim]⚡ {elapsed:.1f}s • {self._turn_tokens} tokens ({speed:.1f} tok/s)[/dim]"
-            )
-
-        self._is_streaming = False
-        self._in_reasoning = False
-        self._header_printed = False
-        self.console.print()
+        """Finish the turn and return its generation speed in tokens per second."""
+        if self._turn is None:
+            return 0.0
+        turn, self._turn = self._turn, None
+        self.last_reasoning_trace = turn.reasoning
+        _, speed = turn.finish()
         return speed
 
     def print_last_thoughts(self) -> None:
-        """Display the reasoning thoughts from the last turn in a bordered modal panel."""
+        """Show the reasoning from the last turn."""
         if not self.last_reasoning_trace.strip():
-            self.console.print("[dim]No reasoning thoughts recorded for the last turn.[/dim]")
+            self.console.print(f"[{MUTED}]No reasoning recorded for the last turn.[/{MUTED}]")
             return
-        panel = Panel(
-            self.last_reasoning_trace.strip(),
-            title="[bold #70d6ff]🧠 Model Thinking Trace[/bold #70d6ff]",
-            border_style="#0077b6",
-            padding=(0, 1),
+        self.console.print(
+            Panel(
+                Text(self.last_reasoning_trace.strip(), style=f"italic {MUTED}"),
+                title=f"[bold {SKY}]✻ Last reasoning[/bold {SKY}]",
+                title_align="left",
+                border_style=OCEAN,
+                padding=(0, 1),
+            )
         )
-        self.console.print(panel)
-
-    def print_assistant_markdown(self, markdown_text: str) -> None:
-        """Render assistant content in formatted markdown."""
-        md = Markdown(markdown_text, code_theme="monokai")
-        self.console.print(md)
 
     def print_tool_call(self, name: str, arguments: dict[str, Any]) -> None:
-        """Render a formatted blue card for a requested tool call."""
-        import json
-
-        args_str = json.dumps(arguments, indent=2)
-        code = Syntax(args_str, "json", theme="monokai", line_numbers=False)
-        panel = Panel(
-            code,
-            title=f"[bold #70d6ff]🛠️  Tool Request:[/bold #70d6ff] [bold white]{name}[/bold white]",
-            border_style="#0077b6",
-            padding=(0, 1),
+        """Show a tool the model asked to run."""
+        code = Syntax(json.dumps(arguments, indent=2), "json", theme="monokai")
+        self.console.print(
+            Panel(
+                code,
+                title=f"[bold {SKY}]⚙ {name}[/bold {SKY}]",
+                title_align="left",
+                border_style=OCEAN,
+                padding=(0, 1),
+            )
         )
-        self.console.print(panel)
 
     def print_tool_result(self, name: str, output: str, ok: bool) -> None:
-        """Render the output returned from a tool execution."""
-        status_color = "#70d6ff" if ok else "#ff4d6d"
-        title = f"[{status_color}]Result: {name} ({'OK' if ok else 'ERROR'})[/{status_color}]"
-        panel = Panel(
-            output.strip() or "(empty)",
-            title=title,
-            border_style=status_color,
-            padding=(0, 1),
+        """Show what a tool returned."""
+        color = CYAN if ok else ERROR
+        self.console.print(
+            Panel(
+                output.strip() or "(empty)",
+                title=f"[{color}]{'✔' if ok else '✖'} {name}[/{color}]",
+                title_align="left",
+                border_style=color,
+                padding=(0, 1),
+            )
         )
-        self.console.print(panel)
 
     def print_info(self, message: str) -> None:
-        """Display an informational notification."""
-        self.console.print(f"[bold #00b4d8]ℹ[/bold #00b4d8] {message}")
+        """Show a short notice."""
+        self.console.print(f"  [bold {CYAN}]●[/bold {CYAN}] {message}")
 
     def print_error(self, message: str) -> None:
-        """Display an error notification."""
-        self.console.print(f"[bold red]✖ Error:[/bold red] {message}")
+        """Show an error."""
+        self.console.print(f"  [bold {ERROR}]✖[/bold {ERROR}] {message}")
+
+
+def _short_path(path: Path) -> str:
+    """Show the home directory as ~ to keep the card narrow."""
+    try:
+        return "~/" + str(path.relative_to(Path.home()))
+    except ValueError:
+        return str(path)

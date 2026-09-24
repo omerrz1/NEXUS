@@ -5,13 +5,16 @@ import io
 import pytest
 from rich.console import Console
 
+from nexus.brain.base import Depth
 from nexus.brain.mock import MockBrain
 from nexus.cli.approve import Approval, CliApprover
 from nexus.cli.main import parse_args
 from nexus.cli.oneshot import run_oneshot
 from nexus.cli.render import CliRenderer
 from nexus.cli.slash import handle_slash_command
+from nexus.guardrails.modes import Mode
 from nexus.messages import Message, ToolCall
+from nexus.tools.registry import ToolRegistry
 
 
 def test_cli_renderer_static_banner() -> None:
@@ -21,7 +24,7 @@ def test_cli_renderer_static_banner() -> None:
     renderer.print_banner(animate=False)
     output = buf.getvalue()
     assert "NEXUS" in output or "███" in output
-    assert "LOCAL-FIRST TERMINAL CODING AGENT" in output
+    assert "local-first terminal coding agent" in output
 
 
 def test_cli_renderer_hud() -> None:
@@ -132,7 +135,7 @@ def test_parse_args_defaults() -> None:
     args = parse_args([])
     assert args.model == "nexus-qwen"
     assert args.base_url == "http://127.0.0.1:11434/v1"
-    assert args.mode == "ask"
+    assert args.mode is None  # falls back to the saved setting
     assert args.prompt is None
 
 
@@ -145,3 +148,45 @@ def test_run_oneshot_mode() -> None:
     code = run_oneshot("Hello", brain, renderer)
     assert code == 0
     assert "Oneshot reply test." in buf.getvalue()
+
+
+def test_slash_command_tools_shows_nothing_when_no_tools_registered() -> None:
+    buf = io.StringIO()
+    console = Console(file=buf, force_terminal=False, color_system=None)
+    handle_slash_command("/tools", {"tools": ToolRegistry()}, console)
+    output = buf.getvalue()
+    assert "No tools are registered yet" in output
+    assert "read_file" not in output
+
+
+def test_slash_command_mode_switches_mode() -> None:
+    buf = io.StringIO()
+    console = Console(file=buf, force_terminal=False, color_system=None)
+    context: dict[str, object] = {"mode": Mode.ASK}
+    handle_slash_command("/mode auto", context, console)
+    assert context["mode"] == Mode.AUTO
+    handle_slash_command("/mode bogus", context, console)
+    assert context["mode"] == Mode.AUTO
+    assert "Unknown mode" in buf.getvalue()
+
+
+def test_slash_command_unknown() -> None:
+    buf = io.StringIO()
+    console = Console(file=buf, force_terminal=False, color_system=None)
+    assert handle_slash_command("/undo", {}, console) is False
+    assert "Unknown command" in buf.getvalue()
+
+
+def test_slash_command_depth_sets_depth() -> None:
+    buf = io.StringIO()
+    console = Console(file=buf, force_terminal=False, color_system=None)
+    context: dict[str, object] = {"depth": Depth.BALANCED}
+    handle_slash_command("/depth fast", context, console)
+    assert context["depth"] == Depth.FAST
+
+
+def test_run_oneshot_passes_depth() -> None:
+    brain = MockBrain()
+    renderer = CliRenderer(console=Console(file=io.StringIO(), color_system=None))
+    run_oneshot("Hello", brain, renderer, depth=Depth.FAST)
+    assert brain.depths == [Depth.FAST]

@@ -2,7 +2,7 @@
 
 > A local-first coding agent for the terminal. Local model, local tools, no network.
 
-**Status:** design draft, pre-implementation. Language: Python 3.11+. Everything here is open to change until M1 lands.
+**Status:** the brain and the CLI are built; everything else is planned. Language: Python 3.11+. The design is open to change.
 
 ---
 
@@ -78,8 +78,11 @@ Three supporting layers make the five parts work well with a local model:
 
 ## 4. Repository layout
 
+Files marked `(planned)` do not exist yet. A file or folder is created when it is implemented, so the repository only ever contains working code.
+
 ```
 nexus/                                # repository root
+├── README.md                         # start here: quick start and a map of the code
 ├── ARCHITECTURE.md
 ├── pyproject.toml                    # metadata, dependencies, ruff / mypy / pytest config
 ├── Makefile                          # `make check` = lint + format check + types + tests
@@ -89,22 +92,28 @@ nexus/                                # repository root
 │   ├── messages.py                   # shared plain data: Message, ToolCall, ToolSpec, Usage
 │   │
 │   ├── cli/                          # UI layer: the only place that touches the terminal
-│   │   ├── main.py                   # parse args, load config, wire dependencies by hand, start
+│   │   ├── main.py                   # parse args, load settings, wire dependencies by hand, start
 │   │   ├── repl.py                   # interactive session
 │   │   ├── oneshot.py                # `nexus -p "..."` non-interactive mode
 │   │   ├── doctor.py                 # `nexus doctor`: server reachable? model loaded? tool calls work?
-│   │   ├── render.py                 # events -> terminal (streamed text, diffs, spinners)
-│   │   ├── approve.py                # y / n / always prompts (implements Approver)
-│   │   └── slash.py                  # /help /clear /undo /mode /model /compact /resume
+│   │   ├── prompt.py                 # the input line: / and @ completion menu, history, status bar
+│   │   ├── stream.py                 # one model turn, live: thinking animation, streamed Markdown
+│   │   ├── render.py                 # banner, settings card, tool and error cards
+│   │   ├── slash.py                  # the slash command list and its handlers
+│   │   ├── settings.py               # mode / depth / reasoning settings, saved between sessions
+│   │   ├── picker.py                 # inline arrow-key menu
+│   │   ├── export.py                 # /copy and /save
+│   │   ├── theme.py                  # colors and animation helpers
+│   │   └── approve.py                # y / n / always prompts (implements Approver)
 │   │
 │   ├── brain/                        # talks to the model
-│   │   ├── base.py                   # Brain protocol + BrainReply
+│   │   ├── base.py                   # Brain protocol, BrainReply, Depth
 │   │   ├── openai_compat.py          # llama.cpp server, Ollama, LM Studio, mlx-lm
 │   │   ├── mock.py                   # scripted replies for tests
 │   │   ├── toolcalls.py              # extract tool calls: native -> text fallback -> JSON repair
 │   │   └── tokens.py                 # token estimate, corrected by real usage from the server
 │   │
-│   ├── loop/                         # the agent loop
+│   ├── loop/                         # (planned) the agent loop
 │   │   ├── agent.py                  # run_agent(): the loop itself
 │   │   ├── deps.py                   # Deps: everything the loop needs, passed in explicitly
 │   │   ├── state.py                  # AgentState: messages, todo list, files touched, counters
@@ -114,20 +123,13 @@ nexus/                                # repository root
 │   ├── tools/                        # what the model can do
 │   │   ├── base.py                   # Tool, ToolContext, ToolResult, Risk
 │   │   ├── registry.py               # the explicit tool list; get, specs, execute (timeout + output cap)
-│   │   └── builtin/
-│   │       ├── read_file.py
-│   │       ├── list_dir.py
-│   │       ├── find_files.py
-│   │       ├── search_text.py
-│   │       ├── write_file.py
-│   │       ├── edit_file.py
-│   │       ├── run_command.py
-│   │       └── update_todo.py
+│   │   └── builtin/                  # (planned) read_file, list_dir, find_files, search_text,
+│   │                                 #   write_file, edit_file, run_command, update_todo
 │   │
 │   ├── instructions/                 # what the model is told
-│   │   ├── assemble.py               # builds the system prompt from layers
-│   │   ├── project.py                # loads NEXUS.md (global + project)
-│   │   ├── environment.py            # cwd, OS, shell, git branch/status, date (snapshot at session start)
+│   │   ├── assemble.py               # (planned) builds the system prompt from layers
+│   │   ├── project.py                # (planned) loads NEXUS.md (global + project)
+│   │   ├── environment.py            # (planned) cwd, OS, shell, git branch/status, date
 │   │   └── prompts/                  # shipped prompt text as plain markdown, not string literals
 │   │       ├── core.md               # identity and working style
 │   │       ├── tool_use.md           # how and when to call tools
@@ -135,37 +137,36 @@ nexus/                                # repository root
 │   │       └── plan_mode.md          # read-only addendum
 │   │
 │   ├── guardrails/                   # what the model may do
-│   │   ├── policy.py                 # Guard.check(tool, args) -> Verdict (allow | ask | deny + reason)
 │   │   ├── modes.py                  # Mode: read-only | ask | auto
-│   │   ├── paths.py                  # workspace jail (resolve, symlink, ../ checks)
-│   │   ├── commands.py               # command allowlist / denylist
-│   │   ├── network.py                # loopback-only enforcement
-│   │   └── limits.py                 # Limits dataclass with defaults
+│   │   ├── policy.py                 # (planned) Guard.check(tool, args) -> Verdict
+│   │   ├── paths.py                  # (planned) workspace jail (resolve, symlink, ../ checks)
+│   │   ├── commands.py               # (planned) command allowlist / denylist
+│   │   ├── network.py                # (planned) loopback-only enforcement
+│   │   └── limits.py                 # (planned) Limits dataclass with defaults
 │   │
-│   ├── context/                      # keeps the prompt inside the token budget
+│   ├── context/                      # (planned) keeps the prompt inside the token budget
 │   │   ├── manager.py                # build messages within budget
 │   │   ├── compaction.py             # stub old tool output, then summarize old turns
 │   │   └── repomap.py                # (later) compact map of the repo
 │   │
-│   ├── session/
+│   ├── session/                      # (planned)
 │   │   ├── log.py                    # append-only JSONL of every event
 │   │   ├── resume.py                 # rebuild state from a log
 │   │   └── checkpoints.py            # pre-write snapshots -> /undo
 │   │
-│   └── config/
+│   └── config/                       # (planned)
 │       ├── schema.py                 # config shape (pydantic, validated)
 │       └── load.py                   # defaults <- ~/.nexus/config.toml <- ./.nexus/config.toml <- flags
 │
-├── tests/
-│   ├── conftest.py                   # autouse fixture: fail any non-loopback network connection
-│   ├── test_tools/
-│   ├── test_guardrails/
-│   ├── test_brain/                   # includes the malformed-output corpus for the parser
-│   ├── test_loop/                    # full loop against the mock brain
-│   ├── test_context/
-│   └── evals/                        # real-model task suite, run on demand (not in default CI)
-│
-└── docs/
+└── tests/
+    ├── conftest.py                   # autouse fixture: fail any non-loopback network connection
+    ├── test_cli.py, test_cli_interactive.py
+    ├── test_brain/                   # includes the malformed-output corpus for the parser
+    ├── test_tools/
+    ├── test_guardrails/              # (planned)
+    ├── test_loop/                    # (planned) full loop against the mock brain
+    ├── test_context/                 # (planned)
+    └── evals/                        # (planned) real-model task suite, run on demand
 ```
 
 **Dependency rule.** `messages.py` imports nothing from Nexus. The leaf packages (`brain`, `tools`, `guardrails`, `context`, `instructions`, `session`, `config`) may import `messages` and each other's interfaces (for example `guardrails` reads `tools.base.Tool`), but never `loop` or `cli`, and never in a cycle. `loop` wires the leaf packages together and never touches the terminal: it emits events and calls an injected `Approver`. `cli` depends on `loop`. This is what makes the loop testable with a mock brain and no UI.
@@ -177,6 +178,7 @@ nexus/                                # repository root
 | Runtime dependency | `pydantic` | Tool argument schemas (one model gives both JSON Schema and validation) and config validation |
 | Runtime dependency | `httpx` | Talking to the model server, including streaming |
 | Runtime dependency | `rich` | Rendering text, diffs, and spinners in `cli/` only |
+| Runtime dependency | `prompt_toolkit` | The input line: completion menus, history, hotkeys, and pickers, in `cli/` only |
 | Standard library | `argparse`, `tomllib`, `subprocess`, `pathlib`, `dataclasses`, `json` | Flags, config, commands, paths, data |
 | Dev only | `pytest`, `ruff`, `mypy` | Tests, lint and format, type checking |
 
@@ -470,7 +472,7 @@ Token counts are estimated locally and corrected with the real `usage` numbers t
 - **Modes:** interactive REPL (`nexus`), one-shot (`nexus -p "..."`), and `nexus doctor`.
 - **Flags:** `--mode`, `--model`, `--resume`, `--config`.
 - **Slash commands:** `/help` `/clear` `/undo` `/mode` `/model` `/compact` `/resume`.
-- **First version is `rich` for output and the built-in `input()` for input.** A fuller interactive UI (`prompt_toolkit`, multiline editing, history) can come later behind the same event bus without touching the loop.
+- **`rich` draws output and `prompt_toolkit` reads input.** The input line has a completion menu (`/` commands with descriptions, `@` file mentions), history with inline suggestions, a status bar, and hotkeys (Shift-Tab cycles the mode, Ctrl-T cycles the thinking depth). Settings are chosen with inline arrow-key pickers and saved to `~/.nexus/settings.json`; command-line flags override them for one run.
 - **Installed as a command** via a `pyproject.toml` entry point (`nexus = "nexus.cli.main:main"`).
 
 ### 5.9 Config (`nexus/config/`)
@@ -594,7 +596,7 @@ The eval harness is how we pick a model and tune prompts by measurement instead 
 | 3 | Model runtime | Any OpenAI-compatible local server. Develop against Ollama; add llama.cpp for constrained decoding | One adapter covers all; Nexus stays out of model management | A runtime needs a native API for something we need |
 | 4 | HTTP client | `httpx` directly, no vendor SDK | Full control over what is sent; one fewer large dependency | n/a |
 | 5 | Schemas and config | `pydantic` v2 | One definition yields JSON Schema and validation | The dependency weight starts to matter |
-| 6 | First UI | `rich` output, built-in `input()` | The loop is the hard part; a richer UI can be added on the same event bus | Approval and diff UX feels cramped |
+| 6 | UI | `rich` output, `prompt_toolkit` input | Completion menus, pickers, and hotkeys make a local agent easy to drive; both stay inside `cli/` | A full-screen layout is needed |
 | 7 | Default mode | `ask` | Safe default; `auto` is opt-in | Approvals become friction for common commands |
 | 8 | Agent topology | Single loop | Sub-agents multiply context cost, which is scarce locally | Tasks routinely exceed one context window |
 | 9 | Model choice | Decide with the eval harness; it is config, not code | Avoids committing before measuring | n/a |

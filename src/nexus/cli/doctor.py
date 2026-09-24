@@ -6,6 +6,7 @@ from rich.console import Console
 from rich.panel import Panel
 from rich.table import Table
 
+from nexus.brain.base import Depth
 from nexus.brain.openai_compat import OpenAIBrain, is_loopback_url
 from nexus.messages import Message, ToolSpec
 
@@ -44,6 +45,7 @@ def run_doctor(
         # 3. Model Streaming Probe
         reply = brain.chat(
             messages=[Message.user("Reply with only the single word: OK")],
+            depth=Depth.FAST,  # the probes check that things work, not answer quality
         )
         latency = (time.perf_counter() - start_time) * 1000
         table.add_row(
@@ -83,6 +85,7 @@ def run_doctor(
                     Message.user("Run ping_probe."),
                 ],
                 tools=[tool_spec],
+                depth=Depth.FAST,
             )
             has_tools = len(tool_reply.tool_calls) > 0
             table.add_row(

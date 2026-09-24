@@ -2,9 +2,18 @@
 
 from collections.abc import Callable
 from dataclasses import dataclass
+from enum import StrEnum
 from typing import Protocol
 
 from nexus.messages import Message, ToolCall, ToolSpec, Usage
+
+
+class Depth(StrEnum):
+    """How long the model may think before it answers. Less thinking is faster."""
+
+    FAST = "fast"  # no thinking: the answer starts almost immediately
+    BALANCED = "balanced"  # the model's own default amount of thinking
+    DEEP = "deep"  # the most thinking the server allows; slowest
 
 
 @dataclass(frozen=True)
@@ -30,6 +39,7 @@ class Brain(Protocol):
         tools: list[ToolSpec] | None = None,
         on_delta: Callable[[str], None] | None = None,
         on_reasoning: Callable[[str], None] | None = None,
+        depth: Depth = Depth.BALANCED,
     ) -> BrainReply:
         """Send conversation history and optional tools, streaming tokens via callbacks."""
         ...

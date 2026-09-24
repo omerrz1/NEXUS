@@ -8,10 +8,20 @@ from urllib.parse import urlparse
 
 import httpx
 
-from nexus.brain.base import BrainReply
+from nexus.brain.base import BrainReply, Depth
 from nexus.brain.tokens import estimate_tokens
 from nexus.brain.toolcalls import extract_all_tool_calls
 from nexus.messages import Message, ToolSpec, Usage
+
+# The OpenAI `reasoning_effort` value sent for each depth. BALANCED sends nothing so the
+# server's default applies, which also keeps models that cannot think working. On
+# thinking models served by Ollama, "low" and "medium" think about as long as the
+# default; only "none" actually skips thinking, which is why FAST uses it.
+_REASONING_EFFORT: dict[Depth, str | None] = {
+    Depth.FAST: "none",
+    Depth.BALANCED: None,
+    Depth.DEEP: "high",
+}
 
 
 def is_loopback_url(url: str) -> bool:
@@ -68,9 +78,10 @@ class OpenAIBrain:
         tools: list[ToolSpec] | None = None,
         on_delta: Callable[[str], None] | None = None,
         on_reasoning: Callable[[str], None] | None = None,
+        depth: Depth = Depth.BALANCED,
     ) -> BrainReply:
         """Send conversation messages and stream or await the model response."""
-        payload = self._build_payload(messages, tools, stream=on_delta is not None)
+        payload = self._build_payload(messages, tools, depth, stream=on_delta is not None)
         url = f"{self._base_url}/chat/completions"
 
         try:
@@ -87,6 +98,7 @@ class OpenAIBrain:
         self,
         messages: list[Message],
         tools: list[ToolSpec] | None,
+        depth: Depth,
         stream: bool,
     ) -> dict[str, Any]:
         """Construct the chat completions JSON request payload."""
@@ -97,6 +109,9 @@ class OpenAIBrain:
             "stream": stream,
             "options": {"num_ctx": self._context_window},
         }
+        effort = _REASONING_EFFORT[depth]
+        if effort is not None:
+            payload["reasoning_effort"] = effort
         if tools:
             payload["tools"] = [tool.to_dict() for tool in tools]
         if stream:
