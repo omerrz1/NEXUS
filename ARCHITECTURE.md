@@ -1,8 +1,8 @@
 # Nexus — Architecture
 
-> A local-first coding agent for the terminal. Local model, local tools, no network.
+> A local-first AI agent for the terminal. Local model, local tools, no network.
 
-**Status:** the brain and the CLI are built; everything else is planned. Language: Python 3.11+. The design is open to change.
+**Status:** the brain, the CLI, the agent loop, five tools, and the core guardrails are built. Context compaction, sessions and undo, config files, and the remaining tools are planned. Language: Python 3.11+. The design is open to change.
 
 ---
 
@@ -103,6 +103,8 @@ nexus/                                # repository root
 │   │   ├── settings.py               # mode / depth / reasoning settings, saved between sessions
 │   │   ├── picker.py                 # inline arrow-key menu
 │   │   ├── export.py                 # /copy and /save
+│   │   ├── agent_events.py           # turns loop events into terminal output
+│   │   ├── status.py                 # server health probe and git branch for the details card
 │   │   ├── theme.py                  # colors and animation helpers
 │   │   └── approve.py                # y / n / always prompts (implements Approver)
 │   │
@@ -113,40 +115,44 @@ nexus/                                # repository root
 │   │   ├── toolcalls.py              # extract tool calls: native -> text fallback -> JSON repair
 │   │   └── tokens.py                 # token estimate, corrected by real usage from the server
 │   │
-│   ├── loop/                         # (planned) the agent loop
-│   │   ├── agent.py                  # run_agent(): the loop itself
+│   ├── loop/                         # the agent loop
+│   │   ├── agent.py                  # run_agent(): the loop itself, and run_tool_call()
 │   │   ├── deps.py                   # Deps: everything the loop needs, passed in explicitly
-│   │   ├── state.py                  # AgentState: messages, todo list, files touched, counters
-│   │   ├── stop.py                   # stop conditions: max steps, repeat detector, error streak
-│   │   └── events.py                 # event dataclasses + EventBus
+│   │   ├── stop.py                   # stop conditions: repeat detector, error streak
+│   │   └── events.py                 # event dataclasses and HaltReason
 │   │
 │   ├── tools/                        # what the model can do
 │   │   ├── base.py                   # Tool, ToolContext, ToolResult, Risk
-│   │   ├── registry.py               # the explicit tool list; get, specs, execute (timeout + output cap)
-│   │   └── builtin/                  # (planned) read_file, list_dir, find_files, search_text,
-│   │                                 #   write_file, edit_file, run_command, update_todo
+│   │   ├── registry.py               # the explicit tool list; get, names, specs
+│   │   ├── output.py                 # cap_text(): keep tool output inside the size limits
+│   │   └── builtin/
+│   │       ├── read_file.py          # numbered lines, paged
+│   │       ├── list_dir.py           # folder listing, shallow or a few levels deep
+│   │       ├── find_files.py         # find by name pattern, with time and match limits
+│   │       ├── write_file.py         # create or replace a file; previews a diff for approval
+│   │       ├── run_command.py        # bash, no stdin, timeout kills the process tree
+│   │       └── (planned)             # search_text, edit_file, update_todo
 │   │
 │   ├── instructions/                 # what the model is told
-│   │   ├── assemble.py               # (planned) builds the system prompt from layers
+│   │   ├── assemble.py               # builds the system prompt from the layers
 │   │   ├── project.py                # (planned) loads NEXUS.md (global + project)
-│   │   ├── environment.py            # (planned) cwd, OS, shell, git branch/status, date
+│   │   ├── environment.py            # cwd, OS, shell, date: a snapshot at session start
 │   │   └── prompts/                  # shipped prompt text as plain markdown, not string literals
-│   │       ├── core.md               # identity and working style
+│   │       ├── core.md               # identity: a general AI agent, and its working style
 │   │       ├── tool_use.md           # how and when to call tools
-│   │       ├── coding.md             # read before edit, minimal diffs, run tests
-│   │       └── plan_mode.md          # read-only addendum
+│   │       ├── working_rules.md      # look before changing, smallest change, check the result
+│   │       └── (planned) plan_mode.md  # read-only addendum
 │   │
 │   ├── guardrails/                   # what the model may do
 │   │   ├── modes.py                  # Mode: read-only | ask | auto
-│   │   ├── policy.py                 # (planned) Guard.check(tool, args) -> Verdict
-│   │   ├── paths.py                  # (planned) workspace jail (resolve, symlink, ../ checks)
-│   │   ├── commands.py               # (planned) command allowlist / denylist
-│   │   ├── network.py                # (planned) loopback-only enforcement
-│   │   └── limits.py                 # (planned) Limits dataclass with defaults
+│   │   ├── policy.py                 # check_tool_call(tool, args, mode, ctx) -> Verdict
+│   │   ├── commands.py               # command denylist and the read-only safe list
+│   │   ├── approval.py               # Approval and the Approver interface
+│   │   └── network.py                # (planned) loopback-only enforcement
 │   │
-│   ├── context/                      # (planned) keeps the prompt inside the token budget
-│   │   ├── manager.py                # build messages within budget
-│   │   ├── compaction.py             # stub old tool output, then summarize old turns
+│   ├── context/                      # keeps the prompt inside the token budget
+│   │   ├── manager.py                # shrink_to_fit(): stub old tool output when space runs out
+│   │   ├── compaction.py             # (planned) summarize old turns
 │   │   └── repomap.py                # (later) compact map of the repo
 │   │
 │   ├── session/                      # (planned)
@@ -163,9 +169,10 @@ nexus/                                # repository root
     ├── test_cli.py, test_cli_interactive.py
     ├── test_brain/                   # includes the malformed-output corpus for the parser
     ├── test_tools/
-    ├── test_guardrails/              # (planned)
-    ├── test_loop/                    # (planned) full loop against the mock brain
-    ├── test_context/                 # (planned)
+    ├── test_guardrails/              # adversarial command and policy tests
+    ├── test_loop/                    # full loop against the mock brain
+    ├── test_context/
+    ├── test_architecture.py          # import scan enforcing the dependency rule; prompt budget
     └── evals/                        # (planned) real-model task suite, run on demand
 ```
 
@@ -292,6 +299,12 @@ def run_tool_call(call: ToolCall, deps: Deps) -> ToolResult:
 | Wall-clock budget | 10 min | Halt and report |
 | User interrupt (Ctrl-C) | n/a | `KeyboardInterrupt` is caught in `cli/`; the in-flight request is closed, any partial assistant message is discarded, state stays consistent, control returns to the prompt |
 
+**How the code differs from the sketch above.** The loop is built as sketched, with three simplifications that keep it plainer:
+
+- `run_agent(messages, deps, mode, depth, on_event)` works on the conversation list directly, so there is no separate `AgentState` class. The REPL owns the list and undoes a turn by truncating it.
+- Events go to a plain `on_event` callback instead of an `EventBus` object.
+- `check_tool_call(...)` is a function, not a `Guard` class, because it has no state. The mode is passed in on each call, so `/mode` takes effect immediately.
+
 **Events** (`events.py`) are frozen dataclasses and the only channel out of the loop. The renderer and the session log both subscribe to the `EventBus`, and the renderer uses `match` to draw each kind.
 
 | Event | Emitted when |
@@ -392,8 +405,8 @@ The system prompt is assembled from layers, in this order:
 |---|---|---|---|
 | 1 | Identity and working style | `prompts/core.md` | Never |
 | 2 | Tool-use rules | `prompts/tool_use.md` | Never |
-| 3 | Coding rules | `prompts/coding.md` | Never |
-| 4 | Mode addendum | `prompts/plan_mode.md` (read-only mode only) | Per session |
+| 3 | Working rules | `prompts/working_rules.md` | Never |
+| 4 | Mode addendum (planned) | `prompts/plan_mode.md` (read-only mode only) | Per session |
 | 5 | Project instructions | `~/.nexus/NEXUS.md`, then `<repo>/NEXUS.md` | Per session |
 | 6 | Environment block | cwd, OS, shell, git branch and status, date | **Snapshot once at session start** |
 
@@ -416,15 +429,16 @@ validate args -> path jail -> command rules -> policy (mode x risk) -> approval 
 | Risk | `read-only` | `ask` (default) | `auto` |
 |---|---|---|---|
 | `read` | allow | allow | allow |
-| `write` | deny | ask, showing a diff | allow, checkpointed |
+| `write` | deny | ask, showing a diff | allow inside the workspace (no undo yet), ask outside it |
 | `exec` | deny, except safe-listed commands | ask, unless safe-listed | allow, unless denylisted |
 
 **Rules no mode can override:**
 
-- **Path jail** (`paths.py`). Every path is resolved (symlinks included) and must land inside the workspace root or an explicitly added directory. `../`, absolute paths, and symlink escapes are rejected.
+- **Reading is allowed anywhere.** The agent may list, find, and read files on the whole computer so it can help with anything on it. Nothing it reads can leave the machine: there are no network tools and network commands are denied. Paths are resolved (symlinks included) before any check.
+- **Writing outside the workspace always asks**, even in `auto` mode, and never happens in `read-only` mode. A symlink that leads out of the workspace counts as outside. (This replaces the original rule that confined every path to the workspace.)
 - **Command denylist** (`commands.py`). Always denied: privilege escalation (`sudo`, `su`), network tools (`curl`, `wget`, `ssh`, `scp`, `nc`, ...), remote git operations (`push`, `pull`, `fetch`, `clone`), and destructive patterns such as `rm -rf` on `/`, `~`, or the workspace root.
 - **Scrubbed environment.** `run_command` runs with the workspace as its working directory and an environment stripped of inherited secrets (tokens, API keys, cloud credentials).
-- **Limits** (`limits.py`). Command timeout, per-result output cap, max file size for reads and writes.
+- **Limits.** Command timeout, per-result output cap, and file size limits. The output cap is sized to the model's context window (`ToolContext.for_window`) so one result cannot fill it.
 
 **Be honest about what a denylist is.** String-matching commands is a speed bump, not a security boundary; a determined command can evade it. Real containment is an OS-level sandbox (seatbelt / bubblewrap) with the network denied. That is planned for v2 (§10). Until then, `ask` mode with a human reading each command is the actual safety net.
 
@@ -438,10 +452,12 @@ class Approval(StrEnum):
 
 
 class Approver(Protocol):
-    def approve(self, call: ToolCall, preview: str | None) -> Approval: ...
+    def approve(self, call: ToolCall, preview: str | None, scope: str) -> Approval: ...
 ```
 
-`SESSION` grants are scoped to one tool plus an argument pattern, and last only for the current session.
+`SESSION` grants are scoped by the tool's `grant_scope`, not just its name, and last only for the current session: "always" for `run_command` covers one program (say `git`), and for `write_file` covers the working directory, or one file elsewhere.
+
+**Safe commands need no approval.** A single read-only command, or a pipe of them (`ls`, `cat`, `grep`, `git status`, `find` without `-delete` or `-exec`, and a few more), runs without asking in every mode except when it is denylisted. Anything with `;`, `&&`, redirection, or substitution asks.
 
 ### 5.6 Context manager (`nexus/context/`)
 
@@ -460,6 +476,14 @@ When usage crosses about 70% of the budget, compaction runs in two passes, cheap
 2. **Summarize old turns.** The model itself condenses the oldest turns into a short summary. The todo list and the list of files touched are pinned and survive every compaction.
 
 Token counts are estimated locally and corrected with the real `usage` numbers the server returns.
+
+**What is built so far.** Only pass 1, and it runs when the conversation would overflow rather than at 70%. Before each model call the loop keeps room free for the reply (a quarter of the window when the model thinks, an eighth when it does not, at least 512 to 1024 tokens) and asks `shrink_to_fit` to stub the oldest tool outputs until the prompt fits. If it still does not fit, the loop stops with `CONTEXT_FULL` and suggests `/new`.
+
+**Estimates are calibrated.** The local estimate runs about 25% low for code and markdown, so the loop starts with a cautious 1.3x factor and replaces it with the ratio of the server's real `prompt_tokens` to its own estimate after every reply. Tool output is also capped at half the window in bytes (`ToolContext.for_window`).
+
+**Cut-off and empty replies are handled, not hidden.** When the server stops a reply for lack of room (`finish_reason: length`) the brain marks it `cut_off`, the loop runs none of its tool calls (they may be half-written), tells the user, and the brain adopts `prompt + reply` tokens as the real window, which corrects a wrong `--context-window`. When a thinking model puts its answer in its reasoning and returns an empty reply, the loop asks once more with thinking off.
+
+**The window is set on the server.** Nexus cannot change it: Ollama's OpenAI-style endpoint ignores `options.num_ctx` (its native `/api/chat` honors it, which a future Ollama adapter could use). Set it with `OLLAMA_CONTEXT_LENGTH` or a Modelfile `PARAMETER num_ctx`, and tell Nexus with `--context-window` (default 16384, defined with the other server defaults in `brain/base.py`).
 
 ### 5.7 Session (`nexus/session/`)
 

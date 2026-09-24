@@ -11,6 +11,8 @@ INDIGO = "#4361ee"
 GLOW = "#caf0f8"
 MUTED = "#5c7c8a"
 ERROR = "#ff4d6d"
+OK = "#3ddc97"
+WARN = "#ffb703"
 
 GRADIENT: tuple[str, ...] = (SKY, CYAN, BLUE, OCEAN, INDIGO)
 

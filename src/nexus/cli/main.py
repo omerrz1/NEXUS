@@ -3,17 +3,21 @@
 import argparse
 import sys
 from dataclasses import replace
+from pathlib import Path
 
 from rich.console import Console
 
 import nexus
-from nexus.brain.base import Depth
+from nexus.brain.base import DEFAULT_BASE_URL, DEFAULT_CONTEXT_WINDOW, DEFAULT_MODEL, Depth
 from nexus.brain.openai_compat import OpenAIBrain
+from nexus.cli.approve import CliApprover
 from nexus.cli.doctor import run_doctor
 from nexus.cli.oneshot import run_oneshot
 from nexus.cli.repl import run_repl
 from nexus.cli.settings import SETTINGS_PATH, Settings, load_settings
 from nexus.guardrails.modes import Mode
+from nexus.loop import Deps
+from nexus.tools.base import ToolContext
 from nexus.tools.registry import default_registry
 
 
@@ -21,19 +25,19 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     """Parse command-line arguments for the Nexus executable."""
     parser = argparse.ArgumentParser(
         prog="nexus",
-        description="Nexus: A local-first coding agent for the terminal.",
+        description="Nexus: A local-first AI agent for the terminal.",
     )
     parser.add_argument("-v", "--version", action="version", version=f"nexus {nexus.__version__}")
     parser.add_argument(
         "-p", "--prompt", type=str, default=None, help="Execute a single prompt non-interactively."
     )
     parser.add_argument(
-        "--model", type=str, default="nexus-qwen", help="Target model name in local runtime."
+        "--model", type=str, default=DEFAULT_MODEL, help="Model name on the local server."
     )
     parser.add_argument(
         "--base-url",
         type=str,
-        default="http://127.0.0.1:11434/v1",
+        default=DEFAULT_BASE_URL,
         help="Local loopback API base URL.",
     )
     parser.add_argument(
@@ -50,6 +54,13 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         default=None,
         help="How long the model thinks before answering: fast (no thinking), "
         "balanced (model default), deep (slowest). Defaults to your saved setting.",
+    )
+    parser.add_argument(
+        "--context-window",
+        type=int,
+        default=DEFAULT_CONTEXT_WINDOW,
+        help="Context size in tokens that the model server runs with. Nexus sizes tool "
+        "output and old history to fit it, and corrects it if a reply is cut off.",
     )
     parser.add_argument(
         "--no-anim", action="store_true", help="Disable the animated startup banner."
@@ -74,6 +85,7 @@ def main(argv: list[str] | None = None) -> None:
         brain = OpenAIBrain(
             base_url=args.base_url,
             model=args.model,
+            context_window=args.context_window,
             timeout_sec=120.0,
         )
     except Exception as err:
@@ -81,19 +93,29 @@ def main(argv: list[str] | None = None) -> None:
         sys.exit(1)
 
     settings = _apply_flags(load_settings(), args)
+    deps = _build_deps(brain, console)
     if args.prompt is not None:
-        code = run_oneshot(args.prompt, brain, depth=settings.depth)
+        code = run_oneshot(args.prompt, deps, depth=settings.depth, mode=settings.mode)
         sys.exit(code)
 
     run_repl(
-        brain=brain,
-        tools=default_registry(),
+        deps=deps,
         settings=settings,
         settings_path=SETTINGS_PATH,
         model_name=args.model,
         base_url=args.base_url,
         animate_banner=not args.no_anim,
         console=console,
+    )
+
+
+def _build_deps(brain: OpenAIBrain, console: Console) -> Deps:
+    """Wire the agent loop's parts together by hand."""
+    return Deps(
+        brain=brain,
+        tools=default_registry(),
+        approver=CliApprover(console),
+        ctx=ToolContext.for_window(Path.cwd(), brain.context_window),
     )
 
 

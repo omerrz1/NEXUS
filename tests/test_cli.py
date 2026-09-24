@@ -1,20 +1,27 @@
 """Unit tests for the CLI rendering, slash commands, and approver."""
 
 import io
+from pathlib import Path
 
 import pytest
 from rich.console import Console
 
 from nexus.brain.base import Depth
 from nexus.brain.mock import MockBrain
-from nexus.cli.approve import Approval, CliApprover
+from nexus.cli.agent_events import EventPrinter
+from nexus.cli.approve import CliApprover
 from nexus.cli.main import parse_args
 from nexus.cli.oneshot import run_oneshot
-from nexus.cli.render import CliRenderer
+from nexus.cli.render import CliRenderer, HudInfo
 from nexus.cli.slash import handle_slash_command
+from nexus.cli.status import ServerStatus
+from nexus.guardrails.approval import Approval
 from nexus.guardrails.modes import Mode
+from nexus.instructions.assemble import build_system_prompt
+from nexus.loop import run_agent
 from nexus.messages import Message, ToolCall
 from nexus.tools.registry import ToolRegistry
+from tests.helpers import make_deps
 
 
 def test_cli_renderer_static_banner() -> None:
@@ -24,23 +31,32 @@ def test_cli_renderer_static_banner() -> None:
     renderer.print_banner(animate=False)
     output = buf.getvalue()
     assert "NEXUS" in output or "███" in output
-    assert "local-first terminal coding agent" in output
+    assert "local-first AI agent" in output
+    assert "coding" not in output
 
 
 def test_cli_renderer_hud() -> None:
     buf = io.StringIO()
-    console = Console(file=buf, force_terminal=False, color_system=None)
+    console = Console(file=buf, force_terminal=False, color_system=None, width=100)
     renderer = CliRenderer(console=console)
     renderer.print_hud(
-        model="test-model",
-        base_url="http://127.0.0.1:11434/v1",
-        mode="ask",
-        tokens=42,
-        speed=25.0,
+        HudInfo(
+            model="test-model",
+            base_url="http://127.0.0.1:11434/v1",
+            tokens=42,
+            speed=25.0,
+            branch="main",
+            server=ServerStatus(online=True, latency_ms=12.4, model_found=True),
+        )
     )
     output = buf.getvalue()
     assert "test-model" in output
-    assert "42" in output
+    assert "127.0.0.1:11434" in output
+    assert "/v1" not in output
+    assert "connected" in output and "12 ms" in output
+    assert "none (chat only)" in output
+    assert "git:main" in output
+    assert "42 tok" in output
     assert "25.0 tok/s" in output
 
 
@@ -145,7 +161,7 @@ def test_run_oneshot_mode() -> None:
     renderer = CliRenderer(console=console)
     brain = MockBrain()
     brain.queue_reply(Message.assistant("Oneshot reply test."))
-    code = run_oneshot("Hello", brain, renderer)
+    code = run_oneshot("Hello", make_deps(Path.cwd(), brain), renderer)
     assert code == 0
     assert "Oneshot reply test." in buf.getvalue()
 
@@ -188,5 +204,128 @@ def test_slash_command_depth_sets_depth() -> None:
 def test_run_oneshot_passes_depth() -> None:
     brain = MockBrain()
     renderer = CliRenderer(console=Console(file=io.StringIO(), color_system=None))
-    run_oneshot("Hello", brain, renderer, depth=Depth.FAST)
+    run_oneshot("Hello", make_deps(Path.cwd(), brain), renderer, depth=Depth.FAST)
     assert brain.depths == [Depth.FAST]
+
+
+def test_system_prompt_describes_a_general_agent() -> None:
+    prompt = build_system_prompt(Path.cwd())
+    assert "AI agent" in prompt
+    assert "coding" not in prompt.lower()
+    assert str(Path.cwd()) in prompt  # the environment snapshot names the working directory
+
+
+def _card_text(info: HudInfo) -> str:
+    buf = io.StringIO()
+    CliRenderer(Console(file=buf, force_terminal=False, color_system=None, width=100)).print_hud(
+        info
+    )
+    return buf.getvalue()
+
+
+def test_hud_warns_when_server_is_down_or_model_is_missing() -> None:
+    base = HudInfo(model="qwen", base_url="http://127.0.0.1:11434/v1", tool_count=8)
+    down = _card_text(HudInfo(**{**base.__dict__, "server": ServerStatus(online=False)}))
+    assert "server not responding" in down and "nexus doctor" in down
+    missing = ServerStatus(online=True, latency_ms=3, model_found=False)
+    assert "no model named 'qwen'" in _card_text(HudInfo(**{**base.__dict__, "server": missing}))
+    assert "8 available" in down
+
+
+def test_slash_model_rechecks_the_server_and_shows_the_card() -> None:
+    buf = io.StringIO()
+    console = Console(file=buf, force_terminal=False, color_system=None, width=100)
+    # Port 9 (discard) is closed on loopback, so the probe fails immediately.
+    context: dict[str, object] = {"model": "qwen", "base_url": "http://127.0.0.1:9/v1"}
+    handle_slash_command("/model", context, console)
+    assert "qwen" in buf.getvalue()
+    assert "server not responding" in buf.getvalue()
+
+
+def test_approver_remembers_always_per_scope_not_per_tool(monkeypatch: pytest.MonkeyPatch) -> None:
+    console = Console(file=io.StringIO(), force_terminal=False)
+    answers = iter(["a", "y"])
+    monkeypatch.setattr("rich.console.Console.input", lambda self, prompt="": next(answers))
+    approver = CliApprover(console=console)
+    call = ToolCall(id="1", name="run_command", arguments={"command": "git log"})
+
+    assert approver.approve(call, "$ git log", scope="run_command git ...") == Approval.SESSION
+    # Same scope: no prompt. Different scope: asked again.
+    assert approver.approve(call, "$ git log", scope="run_command git ...") == Approval.SESSION
+    assert approver.approve(call, "$ ls", scope="run_command ls ...") == Approval.ONCE
+
+
+def test_approval_panel_shows_the_preview() -> None:
+    buf = io.StringIO()
+    console = Console(file=buf, force_terminal=False, color_system=None, width=90)
+
+    class Declining(CliApprover):
+        def _ask(self, scope: str) -> Approval:
+            return Approval.DENY
+
+    call = ToolCall(id="1", name="write_file", arguments={})
+    Declining(console).approve(call, "Replace f.txt\n-old line\n+new line", scope="write_file")
+    output = buf.getvalue()
+    assert "Allow write_file?" in output and "-old line" in output and "+new line" in output
+
+
+def test_tool_call_and_result_are_compact_lines() -> None:
+    buf = io.StringIO()
+    out = CliRenderer(Console(file=buf, force_terminal=False, color_system=None, width=80))
+    out.print_tool_call("run_command", {"command": "ls -la"})
+    out.print_tool_call("write_file", {"path": "a.py", "content": "line1\nline2\nline3"})
+    out.print_tool_result("\n".join(f"row {n}" for n in range(20)), ok=True)
+    out.print_tool_result("Not found: x", ok=False)
+    lines = buf.getvalue().splitlines()
+    assert lines[0].strip() == "⚙ run_command  ls -la"
+    assert "path=a.py" in lines[1] and "content=line1 (+2 lines)" in lines[1]
+    assert "✔ row 0" in buf.getvalue() and "… 14 more lines" in buf.getvalue()
+    assert "✖ Not found: x" in buf.getvalue()
+
+
+def test_event_printer_shows_a_full_tool_turn(tmp_path: Path) -> None:
+    (tmp_path / "hello.txt").write_text("hi there")
+    buf = io.StringIO()
+    out = CliRenderer(Console(file=buf, force_terminal=False, color_system=None, width=80))
+    brain = MockBrain()
+    read = ToolCall(id="c1", name="read_file", arguments={"path": "hello.txt"})
+    brain.queue_reply(Message.assistant("", (read,)), tool_calls=(read,))
+    brain.queue_reply(Message.assistant("The file says hi."))
+
+    printer = EventPrinter(out)
+    run_agent(
+        [Message.system("s"), Message.user("read it")],
+        make_deps(tmp_path, brain),
+        Mode.ASK,
+        Depth.BALANCED,
+        printer,
+    )
+    output = buf.getvalue()
+    assert "⚙ read_file  hello.txt" in output
+    assert "✔     1  hi there" in output
+    assert "The file says hi." in output
+
+
+def test_new_conversation_keeps_only_the_system_prompt() -> None:
+    buf = io.StringIO()
+    console = Console(file=buf, force_terminal=False, color_system=None)
+    messages = [Message.system("sys"), Message.user("hi"), Message.assistant("hello")]
+    context: dict[str, object] = {"messages": messages, "tokens": 99, "turns": 3}
+    handle_slash_command("/new", context, console)
+    assert messages == [Message.system("sys")]
+    assert context["tokens"] == 0 and context["turns"] == 0
+
+
+def test_long_paths_keep_their_filename_and_stay_on_one_line() -> None:
+    buf = io.StringIO()
+    out = CliRenderer(Console(file=buf, force_terminal=False, color_system=None, width=60))
+    out.print_tool_call("read_file", {"path": "/very/long/" + "folder/" * 20 + "notes.md"})
+    lines = buf.getvalue().splitlines()
+    assert len(lines) == 1 and "notes.md" in lines[0]
+
+
+def test_hud_warns_about_a_small_context_window() -> None:
+    small = _card_text(HudInfo(model="m", base_url="http://127.0.0.1:1/v1", context_window=4096))
+    large = _card_text(HudInfo(model="m", base_url="http://127.0.0.1:1/v1", context_window=32768))
+    assert "4,096 tok" in small and "small" in small
+    assert "32,768 tok" in large and "small" not in large

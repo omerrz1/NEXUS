@@ -6,14 +6,14 @@ from rich.console import Console
 from rich.panel import Panel
 from rich.table import Table
 
-from nexus.brain.base import Depth
+from nexus.brain.base import DEFAULT_BASE_URL, DEFAULT_MODEL, Depth
 from nexus.brain.openai_compat import OpenAIBrain, is_loopback_url
 from nexus.messages import Message, ToolSpec
 
 
 def run_doctor(
-    base_url: str = "http://127.0.0.1:11434/v1",
-    model: str = "nexus-qwen",
+    base_url: str = DEFAULT_BASE_URL,
+    model: str = DEFAULT_MODEL,
     console: Console | None = None,
 ) -> bool:
     """Run comprehensive diagnostics on the local environment and model server."""

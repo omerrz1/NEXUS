@@ -1,3 +1,3 @@
-"""Nexus: A local-first coding agent for the terminal."""
+"""Nexus: A local-first AI agent for the terminal."""
 
 __version__ = "0.1.0"

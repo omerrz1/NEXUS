@@ -1,1 +1,1 @@
-"""Guardrails: what the model is allowed to do. So far, only the permission modes."""
+"""Guardrails: what the model may do. Command rules, permission modes, and approval."""

@@ -1,37 +1,32 @@
 """Non-interactive single-prompt execution mode for Nexus."""
 
-from nexus.brain.base import Brain, Depth
+from nexus.brain.base import Depth
+from nexus.cli.agent_events import EventPrinter
 from nexus.cli.render import CliRenderer
+from nexus.guardrails.modes import Mode
+from nexus.instructions.assemble import build_system_prompt
+from nexus.loop import Deps, run_agent
 from nexus.messages import Message
 
 
 def run_oneshot(
     prompt: str,
-    brain: Brain,
+    deps: Deps,
     renderer: CliRenderer | None = None,
     depth: Depth = Depth.BALANCED,
+    mode: Mode = Mode.ASK,
 ) -> int:
-    """Execute a single prompt non-interactively and stream the output."""
+    """Answer one prompt, running any tools it needs. Returns the process exit code."""
     out = renderer or CliRenderer()
+    printer = EventPrinter(out)
     messages = [
-        Message.system("You are Nexus, a local-first coding assistant."),
+        Message.system(build_system_prompt(deps.ctx.workspace)),
         Message.user(prompt),
     ]
-
-    out.start_stream()
     try:
-        reply = brain.chat(
-            messages,
-            on_delta=out.print_chunk,
-            on_reasoning=out.print_reasoning_chunk,
-            depth=depth,
-        )
-        out.end_stream()
-        if reply.tool_calls:
-            for call in reply.tool_calls:
-                out.print_tool_call(call.name, call.arguments)
-        return 0
+        result = run_agent(messages, deps, mode, depth, printer)
     except Exception as err:
-        out.end_stream()
+        printer.close()
         out.print_error(str(err))
         return 1
+    return 0 if result.halt is None else 1

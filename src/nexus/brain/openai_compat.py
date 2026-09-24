@@ -8,7 +8,13 @@ from urllib.parse import urlparse
 
 import httpx
 
-from nexus.brain.base import BrainReply, Depth
+from nexus.brain.base import (
+    DEFAULT_BASE_URL,
+    DEFAULT_CONTEXT_WINDOW,
+    DEFAULT_MODEL,
+    BrainReply,
+    Depth,
+)
 from nexus.brain.tokens import estimate_tokens
 from nexus.brain.toolcalls import extract_all_tool_calls
 from nexus.messages import Message, ToolSpec, Usage
@@ -48,9 +54,9 @@ class OpenAIBrain:
 
     def __init__(
         self,
-        base_url: str = "http://127.0.0.1:11434/v1",
-        model: str = "nexus-qwen",
-        context_window: int = 4096,
+        base_url: str = DEFAULT_BASE_URL,
+        model: str = DEFAULT_MODEL,
+        context_window: int = DEFAULT_CONTEXT_WINDOW,
         temperature: float = 0.2,
         timeout_sec: float = 120.0,
         client: httpx.Client | None = None,
@@ -64,7 +70,6 @@ class OpenAIBrain:
         self._model = model
         self._context_window = context_window
         self._temperature = temperature
-        self._timeout_sec = timeout_sec
         self._client = client or httpx.Client(timeout=timeout_sec)
 
     @property
@@ -130,12 +135,14 @@ class OpenAIBrain:
         content = msg_data.get("content") or ""
         native_calls = msg_data.get("tool_calls")
 
-        tool_calls, _ = extract_all_tool_calls(native_calls, content)
+        tool_calls, errors = extract_all_tool_calls(native_calls, content)
         usage_data = data.get("usage", {})
         usage = self._parse_usage(usage_data, content)
 
+        cut_off = choice.get("finish_reason") == "length"
+        self._learn_window(usage, cut_off)
         assistant_msg = Message.assistant(content, tool_calls)
-        return BrainReply(message=assistant_msg, tool_calls=tool_calls, usage=usage)
+        return BrainReply(assistant_msg, tool_calls, usage, errors, cut_off)
 
     def _chat_stream(
         self,
@@ -162,6 +169,7 @@ class OpenAIBrain:
         content_parts: list[str] = []
         raw_tool_calls: dict[int, dict[str, Any]] = {}
         usage_dict: dict[str, Any] = {}
+        finish_reason = ""
 
         for line in response.iter_lines():
             line = line.strip()
@@ -178,14 +186,18 @@ class OpenAIBrain:
             self._process_chunk(chunk, content_parts, raw_tool_calls, on_delta, on_reasoning)
             if chunk.get("usage"):
                 usage_dict = chunk["usage"]
+            for choice in chunk.get("choices", []):
+                finish_reason = choice.get("finish_reason") or finish_reason
 
         full_content = "".join(content_parts)
         ordered_calls = [raw_tool_calls[i] for i in sorted(raw_tool_calls.keys())]
-        tool_calls, _ = extract_all_tool_calls(ordered_calls or None, full_content)
+        tool_calls, errors = extract_all_tool_calls(ordered_calls or None, full_content)
         usage = self._parse_usage(usage_dict, full_content)
 
+        cut_off = finish_reason == "length"
+        self._learn_window(usage, cut_off)
         assistant_msg = Message.assistant(full_content, tool_calls)
-        return BrainReply(message=assistant_msg, tool_calls=tool_calls, usage=usage)
+        return BrainReply(assistant_msg, tool_calls, usage, errors, cut_off)
 
     def _process_chunk(
         self,
@@ -222,6 +234,17 @@ class OpenAIBrain:
                 entry["function"]["name"] += fn["name"]
             if fn.get("arguments"):
                 entry["function"]["arguments"] += fn["arguments"]
+
+    def _learn_window(self, usage: Usage, cut_off: bool) -> None:
+        """Adopt the server's real window when a reply is cut off by it.
+
+        A reply stopped for lack of room means the prompt and the reply together filled the
+        window, so their total is its size. This corrects a wrong --context-window value.
+        Only server-reported counts are used; the local estimate is too rough for this.
+        """
+        total = usage.prompt_tokens + usage.completion_tokens
+        if cut_off and usage.prompt_tokens > 0 and total < self._context_window:
+            self._context_window = total
 
     def _parse_usage(self, usage_data: dict[str, Any], content: str) -> Usage:
         """Extract server usage or fallback to token heuristic."""

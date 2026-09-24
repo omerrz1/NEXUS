@@ -1,6 +1,6 @@
-"""Token estimation and accounting utilities for local context budgeting."""
+"""Rough token estimates, used to keep the conversation inside the context window."""
 
-from nexus.messages import Message, Usage
+from nexus.messages import Message
 
 
 def estimate_tokens(text: str) -> int:
@@ -32,35 +32,3 @@ def estimate_conversation_tokens(messages: list[Message]) -> int:
     """Estimate token count for a list of conversation messages."""
     total = sum(estimate_message_tokens(msg) for msg in messages)
     return total + 3  # Conversation framing overhead
-
-
-class TokenTracker:
-    """Tracks token consumption with local estimates corrected by server usage."""
-
-    def __init__(self) -> None:
-        self._prompt_tokens: int = 0
-        self._completion_tokens: int = 0
-
-    @property
-    def prompt_tokens(self) -> int:
-        """Accumulated prompt tokens."""
-        return self._prompt_tokens
-
-    @property
-    def completion_tokens(self) -> int:
-        """Accumulated completion tokens."""
-        return self._completion_tokens
-
-    @property
-    def total_tokens(self) -> int:
-        """Total accumulated tokens."""
-        return self._prompt_tokens + self._completion_tokens
-
-    def record_usage(self, usage: Usage, fallback_messages: list[Message] | None = None) -> None:
-        """Record usage from server response or fallback to local estimation."""
-        if usage.prompt_tokens > 0 or usage.completion_tokens > 0:
-            self._prompt_tokens += usage.prompt_tokens
-            self._completion_tokens += usage.completion_tokens
-            return
-        if fallback_messages:
-            self._prompt_tokens += estimate_conversation_tokens(fallback_messages)

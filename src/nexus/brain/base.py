@@ -7,6 +7,12 @@ from typing import Protocol
 
 from nexus.messages import Message, ToolCall, ToolSpec, Usage
 
+# Where Nexus looks for a model when nothing else is said. The window is the context size the
+# model server should be running with; Nexus sizes tool output and old history to fit it.
+DEFAULT_BASE_URL = "http://127.0.0.1:11434/v1"
+DEFAULT_MODEL = "nexus-qwen"
+DEFAULT_CONTEXT_WINDOW = 16384
+
 
 class Depth(StrEnum):
     """How long the model may think before it answers. Less thinking is faster."""
@@ -23,6 +29,8 @@ class BrainReply:
     message: Message
     tool_calls: tuple[ToolCall, ...]
     usage: Usage
+    tool_call_errors: tuple[str, ...] = ()  # tool calls the model made that could not be read
+    cut_off: bool = False  # the server stopped the reply because it ran out of room
 
 
 class Brain(Protocol):

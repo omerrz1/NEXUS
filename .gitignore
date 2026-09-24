@@ -35,3 +35,6 @@ htmlcov/
 
 # Nexus local data
 .nexus/
+
+# Session exports written by /save
+nexus_session_*.md

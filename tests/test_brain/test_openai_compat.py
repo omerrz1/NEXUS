@@ -131,3 +131,50 @@ def test_depth_sets_reasoning_effort(depth: Depth, expected_effort: str | None) 
     brain.chat([Message.user("Hi")], depth=depth)
 
     assert sent.get("reasoning_effort") == expected_effort
+
+
+def sse_reply(finish_reason: str, prompt_tokens: int, completion_tokens: int) -> httpx.Response:
+    total = prompt_tokens + completion_tokens
+    usage = {
+        "prompt_tokens": prompt_tokens,
+        "completion_tokens": completion_tokens,
+        "total_tokens": total,
+    }
+    chunks = [
+        {"choices": [{"delta": {"content": "partial answer"}}]},
+        {"choices": [{"delta": {}, "finish_reason": finish_reason}]},
+        {"usage": usage},
+    ]
+    events = [f"data: {json.dumps(chunk)}\n\n" for chunk in chunks] + ["data: [DONE]\n\n"]
+    headers = {"content-type": "text/event-stream"}
+    return httpx.Response(200, headers=headers, content="".join(events).encode())
+
+
+def streaming_brain(response: httpx.Response, window: int = 16384) -> OpenAIBrain:
+    client = httpx.Client(transport=httpx.MockTransport(lambda request: response))
+    return OpenAIBrain(base_url="http://127.0.0.1:11434/v1", context_window=window, client=client)
+
+
+def test_a_reply_stopped_for_length_is_marked_cut_off_and_teaches_the_real_window() -> None:
+    brain = streaming_brain(sse_reply("length", prompt_tokens=4082, completion_tokens=14))
+    reply = brain.chat([Message.user("hi")], on_delta=lambda text: None)
+    assert reply.cut_off
+    assert (
+        brain.context_window == 4096
+    )  # 4082 + 14: the server's real window, not the 16384 assumed
+
+
+def test_a_normal_stop_is_not_cut_off_and_keeps_the_window() -> None:
+    brain = streaming_brain(sse_reply("stop", prompt_tokens=300, completion_tokens=20))
+    reply = brain.chat([Message.user("hi")], on_delta=lambda text: None)
+    assert not reply.cut_off and brain.context_window == 16384
+
+
+def test_a_cut_off_without_server_counts_does_not_change_the_window() -> None:
+    body = {"choices": [{"message": {"content": "partial"}, "finish_reason": "length"}]}
+    client = httpx.Client(
+        transport=httpx.MockTransport(lambda request: httpx.Response(200, json=body))
+    )
+    brain = OpenAIBrain(base_url="http://127.0.0.1:11434/v1", context_window=8192, client=client)
+    reply = brain.chat([Message.user("hi")])  # not streaming, and the server sent no usage
+    assert reply.cut_off and brain.context_window == 8192

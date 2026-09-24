@@ -9,11 +9,12 @@ from rich.panel import Panel
 from rich.syntax import Syntax
 from rich.table import Table
 
-from nexus.brain.base import Depth
+from nexus.brain.base import DEFAULT_BASE_URL, DEFAULT_MODEL
 from nexus.cli.export import copy_last_code, save_session
+from nexus.cli.render import CliRenderer, hud_from_session
 from nexus.cli.settings import choose_setting, handle_thoughts, open_settings_menu
+from nexus.cli.status import probe_server
 from nexus.cli.theme import CYAN, MUTED, SKY
-from nexus.guardrails.modes import Mode
 from nexus.tools.base import Risk
 from nexus.tools.registry import ToolRegistry, default_registry
 
@@ -38,7 +39,7 @@ SLASH_COMMANDS: tuple[SlashCommand, ...] = (
     SlashCommand(
         "/thoughts", "/thoughts [toggle]", "Show the last reasoning, or toggle showing it"
     ),
-    SlashCommand("/model", "/model", "Show the active model, endpoint, and context window"),
+    SlashCommand("/model", "/model", "Check the server and show the model's details"),
     SlashCommand("/tools", "/tools", "List the tools the model can call"),
     SlashCommand("/tool", "/tool <name>", "Show the parameters of one tool"),
     SlashCommand("/copy", "/copy", "Copy the last code block to the clipboard"),
@@ -46,6 +47,7 @@ SLASH_COMMANDS: tuple[SlashCommand, ...] = (
     SlashCommand("/stats", "/stats", "Show turn and token statistics"),
     SlashCommand("/tokens", "/tokens", "Show session token usage"),
     SlashCommand("/doctor", "/doctor", "Run diagnostic checks on the local model server"),
+    SlashCommand("/new", "/new", "Start a new conversation (frees up the model's memory)"),
     SlashCommand("/clear", "/clear", "Clear the screen"),
     SlashCommand("/exit", "/exit", "Exit Nexus", ("/quit",)),
 )
@@ -94,7 +96,10 @@ def handle_slash_command(
 
 def _run_command(name: str, argument: str, context: dict[str, Any], console: Console) -> None:
     """Dispatch a known, non-exit command to its handler."""
-    tools: ToolRegistry = context.get("tools") or default_registry()
+    # An empty registry is falsy, so test for None rather than using `or`.
+    tools: ToolRegistry | None = context.get("tools")
+    if tools is None:
+        tools = default_registry()
     match name:
         case "/help":
             _show_help(console)
@@ -127,6 +132,8 @@ def _run_command(name: str, argument: str, context: dict[str, Any], console: Con
             choose_setting("depth", argument, context, console)
         case "/clear":
             _clear_screen(context, console)
+        case "/new":
+            _start_new_conversation(context, console)
 
 
 def _show_help(console: Console) -> None:
@@ -202,37 +209,36 @@ def _run_doctor(context: dict[str, Any], console: Console) -> None:
     from nexus.cli.doctor import run_doctor
 
     run_doctor(
-        base_url=context.get("base_url", "http://127.0.0.1:11434/v1"),
-        model=context.get("model", "nexus-qwen"),
+        base_url=context.get("base_url", DEFAULT_BASE_URL),
+        model=context.get("model", DEFAULT_MODEL),
         console=console,
     )
 
 
+def _start_new_conversation(context: dict[str, Any], console: Console) -> None:
+    """Forget the conversation, keeping only the system prompt, and reset the counters."""
+    messages = context.get("messages", [])
+    del messages[1:]
+    context.update(tokens=0, turns=0, speed=0.0, last_reply="")
+    console.print(f"  [bold {CYAN}]✔[/bold {CYAN}] Started a new conversation.")
+
+
 def _clear_screen(context: dict[str, Any], console: Console) -> None:
-    """Clear screen and redraw banner and HUD."""
+    """Clear the screen and redraw the banner and details card."""
     console.clear()
     renderer = context.get("renderer")
     if renderer is not None:
         renderer.print_banner(animate=False)
-        renderer.print_hud(
-            model=context.get("model", "unknown"),
-            base_url=context.get("base_url", "unknown"),
-            mode=context.get("mode", Mode.ASK),
-            depth=context.get("depth", Depth.BALANCED),
-            tokens=context.get("tokens", 0),
-            speed=context.get("speed", 0.0),
-            context_window=context.get("context_window", 4096),
-        )
+        renderer.print_hud(hud_from_session(context))
 
 
 def _show_model_info(context: dict[str, Any], console: Console) -> None:
-    """Print active model and context info."""
-    console.print(
-        f"[bold #70d6ff]Active Model:[/bold #70d6ff] [white]{context.get('model')}[/white]\n"
-        f"[bold #00b4d8]Endpoint:[/bold #00b4d8] [white]{context.get('base_url')}[/white]\n"
-        f"[bold #1e90ff]Context Window:[/bold #1e90ff] "
-        f"[white]{context.get('context_window', 4096)} tokens[/white]"
+    """Re-check the model server and show the details card with the fresh result."""
+    context["server"] = probe_server(
+        context.get("base_url", ""), context.get("model", ""), timeout_sec=3.0
     )
+    renderer = context.get("renderer") or CliRenderer(console)
+    renderer.print_hud(hud_from_session(context))
 
 
 def _show_stats(context: dict[str, Any], console: Console) -> None:

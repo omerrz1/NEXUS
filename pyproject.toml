@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "nexus"
 version = "0.1.0"
-description = "A local-first coding agent for the terminal. Local model, local tools, no network."
+description = "A local-first AI agent for the terminal. Local model, local tools, no network."
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
@@ -27,6 +27,10 @@ nexus = "nexus.cli.main:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+[tool.setuptools.package-data]
+# Prompt text ships as Markdown files next to the code.
+nexus = ["py.typed", "instructions/prompts/*.md"]
 
 [tool.ruff]
 line-length = 100

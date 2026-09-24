@@ -1,72 +1,79 @@
-"""Interactive terminal confirmation prompt implementing the Approver interface."""
+"""The terminal prompt that asks the user before a guarded tool call runs."""
 
-from enum import StrEnum
-from typing import Protocol
+import json
 
 from rich.console import Console
 from rich.panel import Panel
+from rich.text import Text
 
+from nexus.cli.theme import CYAN, ERROR, MUTED, OK, SKY, WARN
+from nexus.guardrails.approval import Approval
 from nexus.messages import ToolCall
 
 
-class Approval(StrEnum):
-    """The decision options for approving a guarded action."""
-
-    ONCE = "once"
-    SESSION = "session"
-    DENY = "deny"
-
-
-class Approver(Protocol):
-    """Protocol for asking user consent before executing guarded operations."""
-
-    def approve(self, call: ToolCall, preview: str | None = None) -> Approval:
-        """Prompt user for confirmation on a tool execution."""
-        ...
-
-
 class CliApprover:
-    """Prompts the user interactively in the terminal with styled blue panels."""
+    """Shows what a tool call will do and asks yes, always, or no."""
 
     def __init__(self, console: Console | None = None) -> None:
         self.console: Console = console or Console()
         self._session_grants: set[str] = set()
 
-    def approve(self, call: ToolCall, preview: str | None = None) -> Approval:
-        """Prompt user with y/a/n choices, checking existing session grants first."""
-        if call.name in self._session_grants:
+    def approve(
+        self, call: ToolCall, preview: str | None = None, scope: str | None = None
+    ) -> Approval:
+        """Ask about one call. "Always" is remembered for `scope` until the session ends."""
+        scope = scope or call.name
+        if scope in self._session_grants:
             return Approval.SESSION
 
-        preview_text = preview or f"Tool: {call.name}\nArgs: {call.arguments}"
-        panel = Panel(
-            preview_text,
-            title=f"[bold #ffb703]⚠ Approval Requested:[/bold #ffb703] [white]{call.name}[/white]",
-            border_style="#0096c7",
-            padding=(0, 1),
+        self.console.print(
+            Panel(
+                _style_preview(preview or json.dumps(call.arguments, indent=2)),
+                title=f"[bold {WARN}]⚠ Allow {call.name}?[/bold {WARN}]",
+                title_align="left",
+                border_style=WARN,
+                padding=(0, 1),
+            )
         )
-        self.console.print(panel)
+        answer = self._ask(scope)
+        if answer is Approval.SESSION:
+            self._session_grants.add(scope)
+        return answer
 
+    def _ask(self, scope: str) -> Approval:
+        prompt = (
+            f"  [bold {OK}]y[/bold {OK}][{MUTED}]es[/{MUTED}]  "
+            f"[bold {CYAN}]a[/bold {CYAN}][{MUTED}]lways: {scope}[/{MUTED}]  "
+            f"[bold {ERROR}]n[/bold {ERROR}][{MUTED}]o[/{MUTED}]  [bold {SKY}]›[/bold {SKY}] "
+        )
         while True:
             try:
-                choice = (
-                    self.console.input(
-                        "[bold #70d6ff]Allow action?[/bold #70d6ff] "
-                        "([bold green]y[/bold green]es / "
-                        "[bold cyan]a[/bold cyan]lways this session / "
-                        "[bold red]n[/bold red]o): "
-                    )
-                    .strip()
-                    .lower()
-                )
+                choice = self.console.input(prompt).strip().lower()
             except (KeyboardInterrupt, EOFError):
-                self.console.print("\n[red]Action declined by user interrupt.[/red]")
+                self.console.print(f"\n  [{MUTED}]Declined.[/{MUTED}]")
                 return Approval.DENY
 
             if choice in ("y", "yes"):
                 return Approval.ONCE
             if choice in ("a", "always"):
-                self._session_grants.add(call.name)
                 return Approval.SESSION
             if choice in ("n", "no", ""):
                 return Approval.DENY
-            self.console.print("[dim]Please enter 'y', 'a', or 'n'.[/dim]")
+            self.console.print(f"  [{MUTED}]Please type y, a, or n.[/{MUTED}]")
+
+
+def _style_preview(preview: str) -> Text:
+    """Color diff lines so additions and removals stand out."""
+    text = Text()
+    for line in preview.splitlines():
+        if line.startswith("+") and not line.startswith("+++"):
+            style = OK
+        elif line.startswith("-") and not line.startswith("---"):
+            style = ERROR
+        elif line.startswith("@@") or line.startswith("$ "):
+            style = f"bold {CYAN}"
+        else:
+            style = ""
+        text.append(line + "\n", style=style)
+    text.rstrip()
+    return text

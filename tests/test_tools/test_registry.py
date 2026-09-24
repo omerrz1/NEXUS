@@ -3,7 +3,7 @@
 from pydantic import BaseModel
 
 from nexus.tools.base import Risk, Tool, ToolContext, ToolResult
-from nexus.tools.registry import ToolRegistry, default_registry
+from nexus.tools.registry import ToolRegistry
 
 
 class EchoArgs(BaseModel):
@@ -18,10 +18,6 @@ class Echo(Tool[EchoArgs]):
 
     def run(self, args: EchoArgs, ctx: ToolContext) -> ToolResult:
         return ToolResult.success(args.text)
-
-
-def test_default_registry_is_empty_until_tools_are_added() -> None:
-    assert default_registry().names() == []
 
 
 def test_registry_lookup_and_specs() -> None:

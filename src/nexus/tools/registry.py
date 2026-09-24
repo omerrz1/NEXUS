@@ -5,10 +5,21 @@ from typing import Any
 
 from nexus.messages import ToolSpec
 from nexus.tools.base import Tool
+from nexus.tools.builtin.find_files import FindFiles
+from nexus.tools.builtin.list_dir import ListDir
+from nexus.tools.builtin.read_file import ReadFile
+from nexus.tools.builtin.run_command import RunCommand
+from nexus.tools.builtin.write_file import WriteFile
 
-# Every tool the model can call is listed here by hand. The list is empty until the
-# first built-in tool is implemented; anything shown to the user comes from this list.
-BUILTIN_TOOLS: tuple[Tool[Any], ...] = ()
+# Every tool the model can call is listed here by hand. Anything shown to the user, and
+# every tool spec sent to the model, comes from this list.
+BUILTIN_TOOLS: tuple[Tool[Any], ...] = (
+    ReadFile(),
+    ListDir(),
+    FindFiles(),
+    WriteFile(),
+    RunCommand(),
+)
 
 
 class ToolRegistry:
