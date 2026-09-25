@@ -79,13 +79,13 @@ def run_agent(
     stop = StopTracker()
     usage = Usage.empty()
     request = messages[-1]  # What the user asked; compaction never folds it into a summary.
-    tool_spec_tokens = spec_tokens(deps)
     scale = DEFAULT_SCALE
     retry_without_thinking = False
     for step in range(1, deps.max_steps + 1):
         # After an empty reply, ask again without thinking so the model answers directly.
         step_depth = Depth.FAST if retry_without_thinking else depth
         retry_without_thinking = False
+        tool_spec_tokens = spec_tokens(deps)  # Tools can be made or deleted during a turn.
         fits, spent = make_room(
             messages, deps, step_depth, tool_spec_tokens, scale, request, on_event
         )

@@ -130,3 +130,11 @@ def test_split_finished_blocks_keeps_open_code_fences_together() -> None:
     text = "```py\nx = 1\n\ny = 2\n"
     assert split_finished_blocks(text) == ("", text)
     assert split_finished_blocks("```py\nx = 1\n```\nmore") == ("```py\nx = 1\n```\n", "more")
+
+
+def test_tool_names_are_looked_up_each_time_so_new_tools_are_offered() -> None:
+    names = ["read_file"]
+    completer = NexusCompleter(Path.cwd(), tool_names=lambda: names)
+    assert complete(completer, "/tool ") == ["read_file"]
+    names.append("word_count")  # a tool Nexus made while running
+    assert complete(completer, "/tool wo") == ["word_count"]

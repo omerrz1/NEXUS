@@ -131,6 +131,7 @@ nexus/                                # repository root
 │   │   ├── base.py                   # Tool, ToolContext, ToolResult, Preview, Risk
 │   │   ├── registry.py               # the explicit tool list; get, names, specs
 │   │   ├── output.py                 # cap_text(): keep tool output inside the size limits
+│   │   ├── process.py                # run a child process: no input, a time limit, no secrets
 │   │   ├── builtin/
 │   │   │   ├── read_file.py          # numbered lines, paged
 │   │   │   ├── list_dir.py           # folder listing, shallow or a few levels deep
@@ -141,9 +142,15 @@ nexus/                                # repository root
 │   │   │   ├── update_todo.py        # the model's checklist for multi-step work
 │   │   │   ├── remember.py           # save a session note
 │   │   │   ├── forget.py             # delete a session note
+│   │   │   ├── create_tool.py        # make or replace a tool Nexus can call (always asks)
+│   │   │   ├── delete_tool.py        # delete a tool Nexus made (always asks)
 │   │   │   └── (planned)             # search_text, edit_file
-│   │   └── web/
-│   │       └── duckduckgo.py         # reads DuckDuckGo's HTML results page; skips ads
+│   │   ├── web/
+│   │   │   └── duckduckgo.py         # reads DuckDuckGo's HTML results page; skips ads
+│   │   └── custom/                   # tools Nexus makes for itself
+│   │       ├── manifest.py           # a tool's name, purpose, and inputs; validated on creation
+│   │       ├── script_tool.py        # a Tool that runs a saved script as a child process
+│   │       └── library.py            # ~/.nexus/tools: one folder per tool, saved and loaded
 │   │
 │   ├── instructions/                 # what the model is told
 │   │   ├── assemble.py               # builds the system prompt from the layers
@@ -181,7 +188,7 @@ nexus/                                # repository root
     ├── conftest.py                   # autouse fixture: fail any non-loopback network connection
     ├── test_cli*.py                  # rendering, slash commands, approval, sessions, previews
     ├── test_brain/                   # includes the malformed-output corpus for the parser
-    ├── test_tools/                   # built-in tools, web search over a mock transport
+    ├── test_tools/                   # built-in tools, web search over a mock transport, tool making
     ├── test_guardrails/              # adversarial command and policy tests
     ├── test_loop/                    # full loop against the mock brain, including compaction
     ├── test_context/                 # trimming and summarizing
@@ -396,7 +403,7 @@ class ReadFile(Tool[ReadFileArgs]):
 - **A tool that can need approval describes what it will do** with a `Preview`: plain data (a title, and for a file write its path, current contents, and new contents; for a command or search, the text). The terminal decides how to draw it, so tools stay free of UI code.
 - **Schemas are flat.** Nested argument models are expanded in `Tool.spec()` (no `$ref` or `$defs`), because small models read one flat schema more reliably and it costs fewer tokens.
 - **Registration is a plain list** in `registry.py`. No decorators or auto-discovery, so reading one file tells you every tool that exists.
-- **Keep the tool count small** (about 8-10). Each tool costs prompt tokens and increases the chance of a wrong choice.
+- **Keep the tool count small.** Each tool costs prompt tokens and increases the chance of a wrong choice. A test keeps the system prompt plus every built-in tool spec under 2000 tokens. Tools Nexus makes add their own specs on top, so at most 12 can exist at once.
 
 **v1 tool set:**
 
@@ -412,8 +419,17 @@ class ReadFile(Tool[ReadFileArgs]):
 | `web_search` | network | Search DuckDuckGo: titles, links, and snippets. Cannot open the pages |
 | `update_todo` | none | The model's checklist for multi-step work; the whole list is sent each time. Survives summarizing |
 | `remember` / `forget` | none | Save or delete a short session note (at most 20, 300 characters each). Survives summarizing |
+| `create_tool` / `delete_tool` | write, always asks | Make, replace, or delete a tool of Nexus's own (see below) |
 
 The `none`-risk tools only change Nexus's own session memory, never the user's files, so they never need approval. Their state lives in one `SessionMemory` object that the tools, the loop, and the CLI share (§5.7).
+
+**Tools Nexus makes for itself** (`nexus/tools/custom/`). A tool made at run time is a folder in `~/.nexus/tools/<name>/` holding `tool.json` (name, description, and inputs) and `run.py`. Editing a tool is replacing it: the model reads `run.py`, then calls `create_tool` again with the same name.
+
+- **A script and a subprocess, not Python loaded into Nexus.** `ScriptTool` runs `run.py` with the interpreter that runs Nexus, passes the inputs as one JSON object on standard input, and returns what it prints. It goes through the same `tools/process.py` as `run_command`: working directory, no other input, a one-minute limit that kills the whole process tree, and an environment without secrets. Model-written code never runs inside the Nexus process, and no manifest can point at another program.
+- **Inputs are text.** Every input is a required string, so the schema stays flat and small models fill it in reliably. The script converts what it needs.
+- **The registry changes at run time.** A new tool is in the model's list on its very next step, so the loop recounts the size of the tool specs every step, not once per turn. Tools on disk are loaded at startup by an explicit `load_custom_tools` call, never by `default_registry()`, so tests never read a developer's real tools. A saved tool whose name matches a built-in is skipped and reported.
+- **Bad scripts are refused before the user is asked.** `create_tool` checks the name, the inputs, and the script's syntax while validating its arguments, so the model gets "syntax error on line 3" as an ordinary tool error and the user is not asked to approve code that cannot run.
+- **Names are safe by construction.** A tool name is 3 to 40 lowercase letters, digits, and underscores, checked before any path is built, so a name can never leave the library folder. The folder and its files are readable only by the owner, and files are replaced atomically.
 
 **`edit_file` is the most failure-prone tool with small models**, so it is built defensively: `old_string` must match exactly once (or `replace_all` is set); a whitespace-tolerant fallback match is tried before failing; on failure it returns the closest matching region so the model can correct itself instead of guessing.
 
@@ -458,9 +474,12 @@ validate args -> path jail -> command rules -> policy (mode x risk) -> approval 
 
 - **Reading is allowed anywhere.** The agent may list, find, and read files on the whole computer so it can help with anything on it. That was safe because nothing it read could leave the machine, and `web_search` changes that: the model can put what it read into a query. So every mode except `auto` shows the exact query and asks first, and the prompt to the model says that search results are data, never instructions. Network commands in `run_command` are still denied. Paths are resolved (symlinks included) before any check.
 - **Writing outside the workspace always asks**, even in `auto` mode, and never happens in `read-only` mode. A symlink that leads out of the workspace counts as outside. (This replaces the original rule that confined every path to the workspace.)
+- **Tools that change Nexus itself always ask.** `create_tool` and `delete_tool` set `always_ask`: they ask in every mode including `auto`, `read-only` refuses them, and their grant scope is empty, so "always allow" is never offered and approving one change cannot approve the next. A tool Nexus made counts as `exec` risk whatever it says it does, and using it asks in `ask` mode, where the user can allow that one tool for the session.
 - **Command denylist** (`commands.py`). Always denied: privilege escalation (`sudo`, `su`), network tools (`curl`, `wget`, `ssh`, `scp`, `nc`, ...), remote git operations (`push`, `pull`, `fetch`, `clone`), and destructive patterns such as `rm -rf` on `/`, `~`, or the workspace root.
 - **Scrubbed environment.** `run_command` runs with the workspace as its working directory and an environment stripped of inherited secrets (tokens, API keys, cloud credentials).
 - **Limits.** Command timeout, per-result output cap, and file size limits. The output cap is sized to the model's context window (`ToolContext.for_window`) so one result cannot fill it.
+
+**Be honest about made tools.** A script Nexus writes is code the model produced, and nothing inspects what it does: it can use the network, read any file, or write outside the working directory, just as any program the user runs could. The denylist does not look inside scripts, and the subprocess limits (time, environment, no input) contain accidents, not malice. What protects the user is that they read the whole script before it exists, and that approval is never automatic. The OS-level sandbox planned for v2 would contain these too.
 
 **Be honest about what a denylist is.** String-matching commands is a speed bump, not a security boundary; a determined command can evade it. Real containment is an OS-level sandbox (seatbelt / bubblewrap) with the network denied. That is planned for v2 (§10). Until then, `ask` mode with a human reading each command is the actual safety net.
 
@@ -658,7 +677,7 @@ The eval harness is how we pick a model and tune prompts by measurement instead 
 | **M4 Reliability** | Text tool-call fallback and JSON repair, repeat detector, summarizing compaction, first eval tasks | Yes |
 | **M5 Publish-ready** | Packaging (`pipx` / `uv tool install`, PyPI), docs, CI network-egress test, license | No |
 
-**After v1:** plan mode polish, skills (on-demand instruction files listed by name and description, loaded by a tool), custom local tools from `~/.nexus/tools/`, local stdio MCP servers, sub-agents, LSP diagnostics, local embedding search, OS-level sandbox.
+**After v1:** plan mode polish, skills (on-demand instruction files listed by name and description, loaded by a tool), local stdio MCP servers, sub-agents, LSP diagnostics, local embedding search, OS-level sandbox.
 
 ---
 
@@ -678,6 +697,7 @@ The eval harness is how we pick a model and tune prompts by measurement instead 
 | 10 | Web search | Scrape DuckDuckGo's HTML page directly with `httpx` and the standard library parser; skip ads | No key, no account, no new dependency. It is brittle by nature: the page needs a browser-like `User-Agent`, and DuckDuckGo answers a challenge page when it limits requests, which the tool reports as "may be limiting requests" | The markup changes, or blocks become common; then add a backend behind a small protocol (a local SearXNG instance would keep Nexus's own traffic on loopback) |
 | 11 | Sessions | One JSON file per session, rewritten after each turn | Compaction rewrites the history, so an append-only log would need replaying; a snapshot is simple and readable | Sessions grow large, or evals need the full raw history |
 | 12 | Summaries | The model summarizes, at about 70% of the budget, keeping the newest 30% verbatim | Cheapest-first (stub, then summarize) keeps most detail, and a rolling summary works on any window size | Summaries lose facts that matter; then pin more, or summarize earlier |
+| 13 | Tools Nexus makes | A script run as a child process, inputs as JSON on stdin, every input a string; created only after the user reads the code, every time | Keeps model-written code out of the Nexus process, reuses the command runner's limits, and keeps schemas flat for small models. It is not a sandbox: the approval is the protection | A real sandbox exists (v2), or typed inputs and optional inputs turn out to be needed |
 
 ---
 

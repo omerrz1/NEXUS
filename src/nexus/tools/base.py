@@ -4,7 +4,7 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from enum import StrEnum
 from pathlib import Path
-from typing import Any, Generic, TypeVar
+from typing import Any, Generic, Protocol, TypeVar
 
 from pydantic import BaseModel
 
@@ -116,6 +116,9 @@ class Tool(ABC, Generic[Args]):
     risk: Risk
     path_fields: tuple[str, ...] = ()  # arguments that hold file paths
     command_fields: tuple[str, ...] = ()  # arguments that hold a shell command
+    # For tools that change what Nexus itself can do. They ask in every mode, even auto, and
+    # "always allow" never applies, so approving one change cannot approve the next.
+    always_ask: bool = False
 
     @abstractmethod
     def run(self, args: Args, ctx: ToolContext) -> ToolResult:
@@ -126,8 +129,11 @@ class Tool(ABC, Generic[Args]):
         return None
 
     def grant_scope(self, args: Args, ctx: ToolContext) -> str:
-        """What "always allow" covers. By default, every call to this tool."""
-        return self.name
+        """What "always allow" covers. By default, every call to this tool.
+
+        An empty string means "always allow" is not offered.
+        """
+        return "" if self.always_ask else self.name
 
     def spec(self) -> ToolSpec:
         """Describe this tool to the model as a JSON Schema function."""
@@ -172,3 +178,15 @@ def _without_titles(schema: Any) -> Any:
     if isinstance(schema, list):
         return [_without_titles(item) for item in schema]
     return schema
+
+
+class ToolCatalog(Protocol):
+    """The part of the tool registry that tools which make or remove other tools use."""
+
+    def get(self, name: str) -> "Tool[Any] | None": ...
+
+    def register(self, tool: "Tool[Any]") -> None: ...
+
+    def unregister(self, name: str) -> bool: ...
+
+    def names(self) -> list[str]: ...

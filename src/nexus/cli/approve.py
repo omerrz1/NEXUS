@@ -8,6 +8,7 @@ from enum import Enum, auto
 
 from prompt_toolkit import prompt as prompt_for_line
 from rich.console import Console
+from rich.markup import escape
 from rich.text import Text
 
 from nexus.cli.picker import Choice, pick
@@ -55,8 +56,8 @@ class CliApprover:
         self, call: ToolCall, preview: Preview | None = None, scope: str | None = None
     ) -> Answer:
         """Ask about one call. "Always" is remembered for `scope` until the session ends."""
-        scope = scope or call.name
-        if scope in self._session_grants:
+        scope = call.name if scope is None else scope
+        if scope and scope in self._session_grants:
             return Answer(Approval.SESSION)
 
         preview = preview or Preview(f"Run {call.name}", body=json.dumps(call.arguments, indent=2))
@@ -67,7 +68,7 @@ class CliApprover:
         else:
             answer = self._ask_by_typing(scope)
 
-        if answer.approval is Approval.SESSION:
+        if answer.approval is Approval.SESSION and scope:
             self._session_grants.add(scope)
         self._say_what_was_decided(answer, scope)
         return answer
@@ -89,9 +90,13 @@ class CliApprover:
                 return Answer(Approval.DENY)  # "No", or the menu was cancelled with esc.
 
     def _ask_by_typing(self, scope: str) -> Answer:
+        always = (
+            f"[bold {CYAN}]a[/bold {CYAN}][{MUTED}]lways: {escape(scope)}[/{MUTED}]  "
+            if scope
+            else ""
+        )
         prompt = (
-            f"  [bold {OK}]y[/bold {OK}][{MUTED}]es[/{MUTED}]  "
-            f"[bold {CYAN}]a[/bold {CYAN}][{MUTED}]lways: {scope}[/{MUTED}]  "
+            f"  [bold {OK}]y[/bold {OK}][{MUTED}]es[/{MUTED}]  {always}"
             f"[bold {ERROR}]n[/bold {ERROR}][{MUTED}]o[/{MUTED}]  [bold {SKY}]›[/bold {SKY}] "
         )
         while True:
@@ -101,11 +106,12 @@ class CliApprover:
                 return Answer(Approval.DENY)
             if choice in ("y", "yes"):
                 return Answer(Approval.ONCE)
-            if choice in ("a", "always"):
+            if choice in ("a", "always") and scope:
                 return Answer(Approval.SESSION)
             if choice in ("n", "no", ""):
                 return Answer(Approval.DENY)
-            self.console.print(f"  [{MUTED}]Please type y, a, or n.[/{MUTED}]")
+            options = "y, a, or n" if scope else "y or n"
+            self.console.print(f"  [{MUTED}]Please type {options}.[/{MUTED}]")
 
     def _ask_what_instead(self) -> str:
         self.console.print(f"  [{MUTED}]What should Nexus do instead? (enter to skip)[/{MUTED}]")
@@ -138,9 +144,10 @@ class CliApprover:
 
 
 def _menu_rows(scope: str, hidden_lines: int) -> list[Choice[_Reply]]:
-    rows = [
-        Choice(_Reply.YES, "Yes", key="y"),
-        Choice(_Reply.ALWAYS, f"Yes, and don't ask again for {scope}", key="a"),
+    rows = [Choice(_Reply.YES, "Yes", key="y")]
+    if scope:  # Some tools can never be allowed for the rest of the session.
+        rows.append(Choice(_Reply.ALWAYS, f"Yes, and don't ask again for {scope}", key="a"))
+    rows += [
         Choice(_Reply.NO, "No", key="n"),
         Choice(_Reply.INSTEAD, "No, and tell Nexus what to do instead", key="t"),
     ]

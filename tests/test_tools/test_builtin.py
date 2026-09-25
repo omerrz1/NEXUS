@@ -32,6 +32,8 @@ def test_registry_holds_exactly_the_built_in_tools() -> None:
         "update_todo",
         "remember",
         "forget",
+        "create_tool",
+        "delete_tool",
     ]
 
 
@@ -181,7 +183,7 @@ def test_the_command_preview_shows_the_command_and_folder(ctx: ToolContext) -> N
     assert tool is not None
     preview = tool.preview(tool.args_model(command="git status"), ctx)
     assert preview is not None and not preview.is_file_change
-    assert preview.body.startswith("$ git status") and str(ctx.workspace) in preview.body
+    assert preview.body == "$ git status\n(in the working directory)"
 
 
 def test_write_file_grant_scope_is_wider_inside_the_workspace(ctx: ToolContext) -> None:

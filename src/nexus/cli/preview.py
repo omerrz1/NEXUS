@@ -45,6 +45,8 @@ def build_card(preview: Preview, visible_lines: int | None = VISIBLE_LINES) -> P
         body, hidden, subtitle = _new_code_body(preview, visible_lines)
     else:
         body, hidden, subtitle = _diff_body(preview.before, preview.after, visible_lines)
+        if preview.body:
+            body = Group(Text(preview.body, style=f"italic {MUTED}"), body)
     return PreviewCard(_panel(preview.title, "✎", BLUE, body, subtitle, hidden), hidden)
 
 

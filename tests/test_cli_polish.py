@@ -229,3 +229,30 @@ def test_long_folders_keep_the_part_that_tells_projects_apart() -> None:
     assert (
         _short_folder("/" + "x" * 80).startswith("…") and len(_short_folder("/" + "x" * 80)) == 28
     )
+
+
+def test_tools_that_nexus_made_are_marked_in_the_tool_list(tmp_path: Path) -> None:
+    from nexus.tools.custom.library import ToolLibrary
+    from nexus.tools.custom.manifest import ToolManifest
+    from nexus.tools.registry import default_registry
+
+    library = ToolLibrary(tmp_path / "tools")
+    registry = default_registry(library=library)
+    registry.register(library.save(ToolManifest("word_count", "Count [words].", {}), "pass\n"))
+    console, output = plain(width=120)
+    handle_slash_command("/tools", {"tools": registry}, console)
+    lines = output.getvalue().splitlines()
+    made = next(line for line in lines if "word_count" in line)
+    assert "(made by Nexus)" in made and "Count [words]." in made
+    assert "(made by Nexus)" not in next(line for line in lines if "read_file" in line)
+
+
+def test_startup_builds_the_registry_around_the_library_it_is_given(tmp_path: Path) -> None:
+    from nexus.brain.openai_compat import OpenAIBrain
+    from nexus.cli.main import _build_deps
+    from nexus.tools.custom.library import ToolLibrary
+
+    console, _ = plain()
+    library = ToolLibrary(tmp_path / "tools")
+    deps = _build_deps(OpenAIBrain(), console, library)
+    assert deps.tools.get("create_tool") is not None and deps.tools.get("delete_tool") is not None

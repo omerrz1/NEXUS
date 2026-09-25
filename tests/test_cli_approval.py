@@ -231,3 +231,33 @@ def test_a_call_with_no_preview_still_shows_what_it_will_do(
     approver.console = Console(file=output, force_terminal=False, width=80)
     approver.approve(ToolCall("1", "mystery", {"x": 1}), None, "mystery")
     assert "Run mystery" in output.getvalue() and '"x": 1' in output.getvalue()
+
+
+# ---- tools that can never be allowed "always"
+
+
+def test_a_change_to_nexus_itself_offers_no_always_choice(on_a_terminal: list[str]) -> None:
+    menu = FakeMenu(_Reply.YES)
+    make_approver(menu)[0].approve(CALL, SMALL, "")
+    assert [row.key for row in menu.shown[0]] == ["y", "n", "t"]
+
+
+def test_an_answer_without_a_scope_is_asked_every_time(on_a_terminal: list[str]) -> None:
+    menu = FakeMenu(_Reply.YES, _Reply.YES)
+    approver, _ = make_approver(menu)
+    approver.approve(CALL, SMALL, "")
+    approver.approve(CALL, SMALL, "")
+    assert len(menu.shown) == 2
+
+
+def test_typing_always_is_not_accepted_when_it_is_not_offered(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    answers = iter(["a", "always", "y", "y"])
+    monkeypatch.setattr("rich.console.Console.input", lambda self, prompt="": next(answers))
+    approver = CliApprover(Console(file=io.StringIO(), force_terminal=False))
+    # "a" and "always" are turned away, and then "y" answers the first question.
+    assert approver.approve(CALL, SMALL, "") == Answer(Approval.ONCE)
+    # Nothing was remembered, so the second question is asked too and uses the last "y".
+    assert approver.approve(CALL, SMALL, "") == Answer(Approval.ONCE)
+    assert next(answers, None) is None

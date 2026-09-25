@@ -3,11 +3,14 @@
 import json
 
 from rich.console import Console
+from rich.markup import escape
 from rich.panel import Panel
 from rich.syntax import Syntax
 from rich.table import Table
 
+from nexus.cli.theme import MUTED
 from nexus.tools.base import Risk
+from nexus.tools.custom.script_tool import ScriptTool
 from nexus.tools.registry import ToolRegistry
 
 _RISK_COLORS: dict[Risk, str] = {
@@ -36,8 +39,11 @@ def show_tools(tools: ToolRegistry, console: Console) -> None:
 
     for tool in tools:
         color = _RISK_COLORS[tool.risk]
+        made = f" [{MUTED}](made by Nexus)[/{MUTED}]" if isinstance(tool, ScriptTool) else ""
         table.add_row(
-            tool.name, f"[bold {color}]{tool.risk.upper()}[/bold {color}]", tool.description
+            tool.name,
+            f"[bold {color}]{tool.risk.upper()}[/bold {color}]",
+            escape(tool.description) + made,
         )
 
     console.print(table)

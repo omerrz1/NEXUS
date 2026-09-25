@@ -44,6 +44,8 @@ def check_tool_call(tool: Tool[Any], args: BaseModel, mode: Mode, ctx: ToolConte
         if reason:
             return Verdict(Decision.DENY, reason)
 
+    if tool.always_ask:
+        return _blocked_in_read_only(tool) if mode is Mode.READ_ONLY else ASK
     if tool.risk is Risk.NETWORK:
         # What leaves the computer could include things the model read, so the user sees it
         # first, in every mode except auto.
@@ -54,14 +56,18 @@ def check_tool_call(tool: Tool[Any], args: BaseModel, mode: Mode, ctx: ToolConte
         return ALLOW  # Read-only commands such as `ls` or `git status` never need asking.
 
     if mode is Mode.READ_ONLY:
-        return Verdict(
-            Decision.DENY,
-            f"{tool.name} is blocked because the session is in read-only mode. "
-            "Tell the user they can allow it with /mode.",
-        )
+        return _blocked_in_read_only(tool)
     if mode is Mode.AUTO and _stays_in_workspace(tool, args, ctx):
         return ALLOW
     return ASK
+
+
+def _blocked_in_read_only(tool: Tool[Any]) -> Verdict:
+    return Verdict(
+        Decision.DENY,
+        f"{tool.name} is blocked because the session is in read-only mode. "
+        "Tell the user they can allow it with /mode.",
+    )
 
 
 def _stays_in_workspace(tool: Tool[Any], args: BaseModel, ctx: ToolContext) -> bool:

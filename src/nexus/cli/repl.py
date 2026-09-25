@@ -72,7 +72,7 @@ def run_repl(
         print_resumed(current, deps.ctx.workspace, out.console)
     prompt = build_prompt_session(
         session,
-        deps.tools.names(),
+        deps.tools.names,
         on_hotkey=lambda key: apply_setting(
             session, key, next_choice(SETTING_CHOICES[key], session[key])
         ),

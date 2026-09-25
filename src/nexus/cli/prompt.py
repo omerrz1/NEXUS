@@ -1,6 +1,6 @@
 """The input line: a completion menu for / commands and @ files, history, and a status bar."""
 
-from collections.abc import Callable, Iterable
+from collections.abc import Callable, Iterable, Sequence
 from pathlib import Path
 from typing import Any
 
@@ -46,9 +46,12 @@ _STYLE = Style.from_dict(
 class NexusCompleter(Completer):
     """Suggests slash commands and their arguments, @file mentions, and paths."""
 
-    def __init__(self, workspace: Path, tool_names: list[str]) -> None:
+    def __init__(
+        self, workspace: Path, tool_names: Sequence[str] | Callable[[], Sequence[str]]
+    ) -> None:
         self.workspace = workspace
-        self.tool_names = tool_names
+        # A function, so tools that Nexus makes while running are offered straight away.
+        self._tool_names = tool_names if callable(tool_names) else (lambda: tool_names)
 
     def get_completions(self, document: Document, event: CompleteEvent) -> Iterable[Completion]:
         line = document.text_before_cursor
@@ -79,7 +82,7 @@ class NexusCompleter(Completer):
         if command.name == "/save":
             candidates = dict.fromkeys(self._complete_paths(word), "")
         elif command.name == "/tool":
-            candidates = dict.fromkeys(self.tool_names, "")
+            candidates = dict.fromkeys(self._tool_names(), "")
         else:
             candidates = _ARGUMENT_HINTS.get(command.name, {})
         for value, hint in candidates.items():
@@ -107,7 +110,7 @@ class NexusCompleter(Completer):
 
 def build_prompt_session(
     session: dict[str, Any],
-    tool_names: list[str],
+    tool_names: Callable[[], Sequence[str]],
     on_hotkey: Callable[[str], None],
 ) -> PromptSession[str]:
     """Create the input line. `on_hotkey` receives "mode" or "depth" when a hotkey cycles it."""

@@ -6,6 +6,7 @@ from dataclasses import replace
 from pathlib import Path
 
 from rich.console import Console
+from rich.markup import escape
 
 import nexus
 from nexus.brain.base import DEFAULT_BASE_URL, DEFAULT_CONTEXT_WINDOW, DEFAULT_MODEL, Depth
@@ -20,7 +21,8 @@ from nexus.loop import Deps
 from nexus.session.memory import SessionMemory
 from nexus.session.store import SessionStore
 from nexus.tools.base import ToolContext
-from nexus.tools.registry import default_registry
+from nexus.tools.custom.library import ToolLibrary
+from nexus.tools.registry import default_registry, load_custom_tools
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
@@ -107,7 +109,10 @@ def main(argv: list[str] | None = None) -> None:
         sys.exit(1)
 
     settings = _apply_flags(load_settings(), args)
-    deps = _build_deps(brain, console)
+    library = ToolLibrary()
+    deps = _build_deps(brain, console, library)
+    for problem in load_custom_tools(deps.tools, library):
+        console.print(f"[bold yellow]Skipped a custom tool[/bold yellow] {escape(problem)}")
     if args.prompt is not None:
         code = run_oneshot(args.prompt, deps, depth=settings.depth, mode=settings.mode)
         sys.exit(code)
@@ -125,12 +130,12 @@ def main(argv: list[str] | None = None) -> None:
     )
 
 
-def _build_deps(brain: OpenAIBrain, console: Console) -> Deps:
+def _build_deps(brain: OpenAIBrain, console: Console, library: ToolLibrary) -> Deps:
     """Wire the agent loop's parts together by hand."""
     memory = SessionMemory()  # Shared: the memory tools change it, and compaction reads it.
     return Deps(
         brain=brain,
-        tools=default_registry(memory),
+        tools=default_registry(memory, library),
         approver=CliApprover(console),
         ctx=ToolContext.for_window(Path.cwd(), brain.context_window),
         memory=memory,

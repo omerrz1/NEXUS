@@ -202,8 +202,9 @@ def test_an_unreadable_tool_call_is_reported_back_to_the_model(tmp_path: Path) -
 
 def test_old_tool_output_is_trimmed_when_the_window_is_small(tmp_path: Path) -> None:
     (tmp_path / "big.txt").write_text("\n".join("word " * 20 for _ in range(60)))
-    # Room for two big results after the prompt, tool specs, and reply space, but not three.
-    brain = MockBrain(context_window=3600)
+    # After the prompt, tool specs, and reply space, too little is left for three big results,
+    # so the older ones must be trimmed. The newest one still fits.
+    brain = MockBrain(context_window=4000)
     script(
         brain,
         call("read_file", "a", path="big.txt"),

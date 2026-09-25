@@ -149,3 +149,24 @@ def test_a_very_long_command_is_cut_and_says_so() -> None:
     body = "$ " + "\n".join(f"echo {n}" for n in range(80))
     text, hidden = draw(Preview("Run a command", body=body))
     assert hidden == 80 - VISIBLE_LINES and f"… {hidden} more lines" in text
+
+
+def test_a_replacement_shows_its_note_above_the_diff() -> None:
+    preview = Preview(
+        "Replace the tool x",
+        body="Counts words.\nInputs: text\nRuns on your computer.",
+        path="/w/run.py",
+        before="print(1)\n",
+        after="print(2)\n",
+    )
+    text, _ = draw(preview)
+    assert text.index("Counts words.") < text.index("1 - print(1)")
+    assert "Runs on your computer." in text and "+1 −1" in text
+
+
+def test_deleting_shows_every_removed_line() -> None:
+    preview = Preview(
+        "Delete the tool x", body="Gone.", path="/w/run.py", before="a\nb\n", after=""
+    )
+    text, _ = draw(preview)
+    assert "1 - a" in text and "2 - b" in text and "+0 −2" in text

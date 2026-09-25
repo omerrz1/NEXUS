@@ -39,3 +39,13 @@ def guard_network_egress(monkeypatch: pytest.MonkeyPatch) -> Generator[None, Non
 
     monkeypatch.setattr(socket.socket, "connect", guarded_connect)
     yield
+
+
+@pytest.fixture(autouse=True)
+def keep_custom_tools_out_of_the_real_home(
+    monkeypatch: pytest.MonkeyPatch, tmp_path_factory: pytest.TempPathFactory
+) -> None:
+    """A test that makes a tool must never write into the developer's own ~/.nexus/tools."""
+    monkeypatch.setattr(
+        "nexus.tools.custom.library.CUSTOM_TOOLS_DIR", tmp_path_factory.mktemp("custom-tools")
+    )

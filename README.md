@@ -35,6 +35,7 @@ Useful from there:
 | `web_search` | Search the web with DuckDuckGo: titles, links, and snippets | Unless in `auto` mode. You see the exact text that will be sent |
 | `update_todo` | Keep a checklist for work with several steps | No |
 | `remember`, `forget` | Save or delete short notes that last for the whole session | No |
+| `create_tool`, `delete_tool` | Make, change, or delete a tool of its own (see below) | Always, in every mode except read-only, which refuses |
 | `run_command` | Run a bash command (no input, no internet, secrets removed from its environment) | In `ask` mode, unless it is a read-only command like `ls` or `git status` |
 
 Press `Shift-Tab` to change how much it asks: `read-only` (never changes anything), `ask` (the default), or `auto` (writes inside the working directory and runs commands without asking). Commands that need the internet, `sudo`, and recursive deletes of your home folder or working directory are always refused.
@@ -53,6 +54,16 @@ PARAMETER num_ctx 16384
 then `ollama create your-model -f Modelfile` (or set `OLLAMA_CONTEXT_LENGTH=16384` for the whole server). If the number Nexus assumes is too big, it corrects itself the first time a reply is cut off, and it tells you when that happens.
 
 The status bar shows how full the window is. Nexus first shortens old tool output, and at about 70% full it has the model summarize the older conversation and carries on with the newest part word for word, so a long session never stops for lack of room. `/compact` does the same on demand.
+
+## Tools Nexus makes for itself
+
+Ask for a tool and Nexus writes it: "make a tool that counts the words in a file", or "change your word_count tool to ignore numbers". A tool is a small Python script that reads its inputs as JSON on standard input and prints its result. It is ready to use straight away and is still there next time (`/tools` marks the ones Nexus made).
+
+- **You approve the code first, every time.** You see the whole script, or a diff against the old one when it replaces a tool, and the answer is never "always": approving one tool cannot approve the next. Even in `auto` mode, and `read-only` mode refuses.
+- **A bad script is turned away before you are asked.** Syntax errors go back to the model, not to you.
+- **Running a tool is judged like running a command.** It asks in `ask` mode, and you can say "always" for that one tool. The script runs in a separate process in your working directory, with secrets removed from its environment and a one-minute limit.
+- **Be clear about what this is not.** The script is code the model wrote, and it is not sandboxed: it can do anything you can, including using the network. Read what you approve. That is also why the approval never becomes automatic.
+- Tools live in `~/.nexus/tools/<name>/` (`run.py` and `tool.json`). You can read or edit them yourself, and delete a folder to remove a tool. There is a limit of 12, because every tool's description is sent with every request.
 
 ## Sessions and memory
 
@@ -80,7 +91,7 @@ src/nexus/
 ├── brain/           talks to the local model
 ├── cli/             everything you see in the terminal
 ├── loop/            the agent loop: ask the model, run its tools, repeat
-├── tools/           what the model can do: nine built-in tools
+├── tools/           what the model can do: eleven built-in tools, and the ones it makes
 ├── guardrails/      what the model may do: modes, command rules, approval
 ├── context/         keeps the conversation inside the model's window: trimming and summarizing
 ├── session/         saved sessions, and the plan and notes that belong to each
