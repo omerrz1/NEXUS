@@ -77,6 +77,15 @@ class Notice:
 
 
 @dataclass(frozen=True)
+class Compacted:
+    """Older messages were replaced by a summary so the conversation can keep going."""
+
+    replaced: int
+    tokens_before: int
+    tokens_after: int
+
+
+@dataclass(frozen=True)
 class Halted:
     """The loop gave up. `message` explains why in words for the user."""
 
@@ -93,6 +102,7 @@ Event = (
     | ToolStarted
     | ToolFinished
     | Notice
+    | Compacted
     | Halted
 )
 EventHandler = Callable[[Event], None]

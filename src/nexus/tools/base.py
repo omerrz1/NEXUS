@@ -18,6 +18,7 @@ class Risk(StrEnum):
     READ = "read"
     WRITE = "write"
     EXEC = "exec"
+    NETWORK = "network"  # sends something off this computer, such as a web search
 
 
 @dataclass(frozen=True)
@@ -49,6 +50,39 @@ class ToolContext:
     def contains(self, path: Path) -> bool:
         """Return True if `path` is the workspace or something inside it."""
         return path.is_relative_to(self.workspace.resolve())
+
+    def display_path(self, path: Path) -> str:
+        """A path as short as it can be while staying clear, for showing to the user.
+
+        Inside the workspace it is relative to it, under the home folder it starts with ~.
+        """
+        workspace = self.workspace.resolve()
+        if path == workspace:
+            return "the working directory"
+        if path.is_relative_to(workspace):
+            return str(path.relative_to(workspace))
+        if path.is_relative_to(Path.home()):
+            return "~/" + str(path.relative_to(Path.home()))
+        return str(path)
+
+
+@dataclass(frozen=True)
+class Preview:
+    """What the user is shown before approving a call.
+
+    Plain data, so the terminal decides how to draw it: a diff, colored code, or plain text.
+    """
+
+    title: str  # One line saying what will happen, such as "Create app/main.py".
+    body: str = ""  # Plain detail, for a command or a search.
+    path: str = ""  # The file this call writes, which picks the syntax colors.
+    before: str | None = None  # What the file holds now; None if it does not exist yet.
+    after: str | None = None  # What the file will hold; None if the call writes no file.
+
+    @property
+    def is_file_change(self) -> bool:
+        """True when the call writes a file, so there is code to show."""
+        return self.after is not None
 
 
 @dataclass(frozen=True)
@@ -87,8 +121,8 @@ class Tool(ABC, Generic[Args]):
     def run(self, args: Args, ctx: ToolContext) -> ToolResult:
         """Do the work. Expected failures are returned as ToolResult.error, never raised."""
 
-    def preview(self, args: Args, ctx: ToolContext) -> str | None:
-        """Text shown to the user when approval is needed, such as a diff or the command."""
+    def preview(self, args: Args, ctx: ToolContext) -> Preview | None:
+        """What to show the user when approval is needed, such as the change or the command."""
         return None
 
     def grant_scope(self, args: Args, ctx: ToolContext) -> str:
@@ -97,7 +131,8 @@ class Tool(ABC, Generic[Args]):
 
     def spec(self) -> ToolSpec:
         """Describe this tool to the model as a JSON Schema function."""
-        schema = _without_titles(self.args_model.model_json_schema())
+        schema = self.args_model.model_json_schema()
+        schema = _without_titles(_inline_refs(schema, schema.get("$defs", {})))
         return ToolSpec(name=self.name, description=self.description, parameters=schema)
 
     def signature(self) -> str:
@@ -109,6 +144,25 @@ class Tool(ABC, Generic[Args]):
             kind = prop.get("type", "value")
             parts.append(f"{name} ({kind}{', required' if name in required else ''})")
         return ", ".join(parts)
+
+
+def _inline_refs(schema: Any, definitions: dict[str, Any]) -> Any:
+    """Replace each "$ref" with the definition it points to.
+
+    Nested argument models make pydantic emit "$defs" and "$ref" indirection. Small models
+    read one flat schema more reliably, and it costs fewer prompt tokens.
+    """
+    if isinstance(schema, dict):
+        if "$ref" in schema:
+            target = definitions[schema["$ref"].removeprefix("#/$defs/")]
+            beside_ref = {key: value for key, value in schema.items() if key != "$ref"}
+            return _inline_refs({**target, **beside_ref}, definitions)
+        return {
+            key: _inline_refs(value, definitions) for key, value in schema.items() if key != "$defs"
+        }
+    if isinstance(schema, list):
+        return [_inline_refs(item, definitions) for item in schema]
+    return schema
 
 
 def _without_titles(schema: Any) -> Any:

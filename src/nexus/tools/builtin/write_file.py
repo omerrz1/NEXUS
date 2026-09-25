@@ -1,14 +1,10 @@
 """write_file: create a file, or replace an existing one completely."""
 
-import difflib
-from pathlib import Path
-
 from pydantic import BaseModel, Field
 
-from nexus.tools.base import Risk, Tool, ToolContext, ToolResult
+from nexus.tools.base import Preview, Risk, Tool, ToolContext, ToolResult
 
 _MAX_CONTENT_CHARS = 1_000_000
-_PREVIEW_LINES = 30
 
 
 class WriteFileArgs(BaseModel):
@@ -42,37 +38,22 @@ class WriteFile(Tool[WriteFileArgs]):
 
         verb = "Replaced" if existed else "Created"
         line_count = len(args.content.splitlines())
-        return ToolResult.success(f"{verb} {path} ({line_count} lines).")
+        return ToolResult.success(f"{verb} {ctx.display_path(path)} ({line_count} lines).")
 
-    def preview(self, args: WriteFileArgs, ctx: ToolContext) -> str | None:
-        """Show a diff against the current file, or the start of the new file."""
+    def preview(self, args: WriteFileArgs, ctx: ToolContext) -> Preview | None:
+        """The file as it will be written, and as it is now if it already exists."""
         path = ctx.resolve(args.path)
+        shown = ctx.display_path(path)
         if not path.exists():
-            return _describe_new_file(path, args.content)
+            return Preview(f"Create {shown}", path=str(path), after=args.content)
         try:
-            old_lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
+            before = path.read_text(encoding="utf-8", errors="replace")
         except OSError:
-            return f"Replace {path}"
-        diff = difflib.unified_diff(
-            old_lines, args.content.splitlines(), f"current {path.name}", "new", lineterm="", n=2
-        )
-        return _limit_lines(f"Replace {path}\n" + "\n".join(diff))
+            note = "The current contents could not be read."
+            return Preview(f"Replace {shown}", body=note, path=str(path), after=args.content)
+        return Preview(f"Replace {shown}", path=str(path), before=before, after=args.content)
 
     def grant_scope(self, args: WriteFileArgs, ctx: ToolContext) -> str:
         """Writing inside the workspace can be granted once; elsewhere it is per file."""
         path = ctx.resolve(args.path)
         return "write_file in the working directory" if ctx.contains(path) else f"write_file {path}"
-
-
-def _describe_new_file(path: Path, content: str) -> str:
-    lines = content.splitlines()
-    head = f"Create {path} ({len(lines)} lines)\n"
-    return _limit_lines(head + "\n".join(f"+ {line}" for line in lines))
-
-
-def _limit_lines(text: str) -> str:
-    """Keep approval prompts short: show the first lines and say how many were left out."""
-    lines = text.splitlines()
-    if len(lines) <= _PREVIEW_LINES:
-        return text
-    return "\n".join(lines[:_PREVIEW_LINES]) + f"\n… {len(lines) - _PREVIEW_LINES} more lines"

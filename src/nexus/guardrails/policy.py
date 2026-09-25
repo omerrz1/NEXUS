@@ -44,6 +44,10 @@ def check_tool_call(tool: Tool[Any], args: BaseModel, mode: Mode, ctx: ToolConte
         if reason:
             return Verdict(Decision.DENY, reason)
 
+    if tool.risk is Risk.NETWORK:
+        # What leaves the computer could include things the model read, so the user sees it
+        # first, in every mode except auto.
+        return ALLOW if mode is Mode.AUTO else ASK
     if tool.risk in (Risk.NONE, Risk.READ):
         return ALLOW
     if commands and all(is_safe_command(command) for command in commands):

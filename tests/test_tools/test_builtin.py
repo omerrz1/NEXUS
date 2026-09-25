@@ -22,12 +22,27 @@ def run(name: str, ctx: ToolContext, **arguments: object) -> ToolResult:
 
 def test_registry_holds_exactly_the_built_in_tools() -> None:
     names = default_registry().names()
-    assert names == ["read_file", "list_dir", "find_files", "write_file", "run_command"]
+    assert names == [
+        "read_file",
+        "list_dir",
+        "find_files",
+        "write_file",
+        "run_command",
+        "web_search",
+        "update_todo",
+        "remember",
+        "forget",
+    ]
 
 
 def test_tool_specs_have_no_titles_to_save_tokens() -> None:
     for spec in default_registry().specs():
         assert "title" not in str(spec.parameters)
+
+
+def test_tool_specs_are_flat_with_no_references_for_small_models() -> None:
+    for spec in default_registry().specs():
+        assert "$ref" not in str(spec.parameters) and "$defs" not in str(spec.parameters)
 
 
 # ---- read_file
@@ -129,10 +144,44 @@ def test_write_file_preview_shows_a_diff_for_existing_files(ctx: ToolContext) ->
     tool = default_registry().get("write_file")
     assert tool is not None
     (ctx.workspace / "f.txt").write_text("one\ntwo\n")
-    diff = tool.preview(tool.args_model(path="f.txt", content="one\nTWO\n"), ctx)
-    assert diff is not None and "-two" in diff and "+TWO" in diff
+    changed = tool.preview(tool.args_model(path="f.txt", content="one\nTWO\n"), ctx)
+    assert changed is not None and changed.title == "Replace f.txt"
+    assert (changed.before, changed.after) == ("one\ntwo\n", "one\nTWO\n")
+    assert changed.path == str(ctx.workspace / "f.txt")
     new = tool.preview(tool.args_model(path="brand-new.txt", content="hello\n"), ctx)
-    assert new is not None and "Create" in new and "+ hello" in new
+    assert new is not None and new.title == "Create brand-new.txt"
+    assert new.before is None and new.after == "hello\n" and new.is_file_change
+
+
+def test_previews_name_files_by_the_shortest_clear_path(ctx: ToolContext) -> None:
+    tool = default_registry().get("write_file")
+    assert tool is not None
+    nested = tool.preview(tool.args_model(path="src/app/main.py", content="x"), ctx)
+    assert nested is not None and nested.title == "Create src/app/main.py"
+    elsewhere = tool.preview(tool.args_model(path="~/notes/todo.txt", content="x"), ctx)
+    assert elsewhere is not None and elsewhere.title == "Create ~/notes/todo.txt"
+
+
+def test_a_file_that_cannot_be_read_is_still_previewed(ctx: ToolContext) -> None:
+    tool = default_registry().get("write_file")
+    assert tool is not None
+    path = ctx.workspace / "secret.txt"
+    path.write_text("hidden")
+    path.chmod(0o000)
+    try:
+        preview = tool.preview(tool.args_model(path="secret.txt", content="new"), ctx)
+    finally:
+        path.chmod(0o600)
+    assert preview is not None and preview.title == "Replace secret.txt"
+    assert preview.before is None and "could not be read" in preview.body
+
+
+def test_the_command_preview_shows_the_command_and_folder(ctx: ToolContext) -> None:
+    tool = default_registry().get("run_command")
+    assert tool is not None
+    preview = tool.preview(tool.args_model(command="git status"), ctx)
+    assert preview is not None and not preview.is_file_change
+    assert preview.body.startswith("$ git status") and str(ctx.workspace) in preview.body
 
 
 def test_write_file_grant_scope_is_wider_inside_the_workspace(ctx: ToolContext) -> None:

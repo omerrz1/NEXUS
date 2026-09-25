@@ -3,19 +3,16 @@
 import io
 from pathlib import Path
 
-import pytest
 from rich.console import Console
 
 from nexus.brain.base import Depth
 from nexus.brain.mock import MockBrain
 from nexus.cli.agent_events import EventPrinter
-from nexus.cli.approve import CliApprover
 from nexus.cli.main import parse_args
 from nexus.cli.oneshot import run_oneshot
 from nexus.cli.render import CliRenderer, HudInfo
 from nexus.cli.slash import handle_slash_command
 from nexus.cli.status import ServerStatus
-from nexus.guardrails.approval import Approval
 from nexus.guardrails.modes import Mode
 from nexus.instructions.assemble import build_system_prompt
 from nexus.loop import run_agent
@@ -125,28 +122,6 @@ def test_slash_command_exit() -> None:
     assert "Goodbye" in buf.getvalue()
 
 
-def test_cli_approver_once(monkeypatch: pytest.MonkeyPatch) -> None:
-    buf = io.StringIO()
-    console = Console(file=buf, force_terminal=False)
-    monkeypatch.setattr("rich.console.Console.input", lambda self, prompt="": "y")
-    approver = CliApprover(console=console)
-    call = ToolCall(id="call_1", name="edit_file", arguments={"path": "x.py"})
-    res = approver.approve(call)
-    assert res == Approval.ONCE
-
-
-def test_cli_approver_session(monkeypatch: pytest.MonkeyPatch) -> None:
-    buf = io.StringIO()
-    console = Console(file=buf, force_terminal=False)
-    monkeypatch.setattr("rich.console.Console.input", lambda self, prompt="": "a")
-    approver = CliApprover(console=console)
-    call = ToolCall(id="call_2", name="edit_file", arguments={"path": "x.py"})
-    res = approver.approve(call)
-    assert res == Approval.SESSION
-    # Second call should bypass prompt and return SESSION immediately
-    assert approver.approve(call) == Approval.SESSION
-
-
 def test_parse_args_defaults() -> None:
     args = parse_args([])
     assert args.model == "nexus-qwen"
@@ -242,33 +217,6 @@ def test_slash_model_rechecks_the_server_and_shows_the_card() -> None:
     assert "server not responding" in buf.getvalue()
 
 
-def test_approver_remembers_always_per_scope_not_per_tool(monkeypatch: pytest.MonkeyPatch) -> None:
-    console = Console(file=io.StringIO(), force_terminal=False)
-    answers = iter(["a", "y"])
-    monkeypatch.setattr("rich.console.Console.input", lambda self, prompt="": next(answers))
-    approver = CliApprover(console=console)
-    call = ToolCall(id="1", name="run_command", arguments={"command": "git log"})
-
-    assert approver.approve(call, "$ git log", scope="run_command git ...") == Approval.SESSION
-    # Same scope: no prompt. Different scope: asked again.
-    assert approver.approve(call, "$ git log", scope="run_command git ...") == Approval.SESSION
-    assert approver.approve(call, "$ ls", scope="run_command ls ...") == Approval.ONCE
-
-
-def test_approval_panel_shows_the_preview() -> None:
-    buf = io.StringIO()
-    console = Console(file=buf, force_terminal=False, color_system=None, width=90)
-
-    class Declining(CliApprover):
-        def _ask(self, scope: str) -> Approval:
-            return Approval.DENY
-
-    call = ToolCall(id="1", name="write_file", arguments={})
-    Declining(console).approve(call, "Replace f.txt\n-old line\n+new line", scope="write_file")
-    output = buf.getvalue()
-    assert "Allow write_file?" in output and "-old line" in output and "+new line" in output
-
-
 def test_tool_call_and_result_are_compact_lines() -> None:
     buf = io.StringIO()
     out = CliRenderer(Console(file=buf, force_terminal=False, color_system=None, width=80))
@@ -278,7 +226,7 @@ def test_tool_call_and_result_are_compact_lines() -> None:
     out.print_tool_result("Not found: x", ok=False)
     lines = buf.getvalue().splitlines()
     assert lines[0].strip() == "⚙ run_command  ls -la"
-    assert "path=a.py" in lines[1] and "content=line1 (+2 lines)" in lines[1]
+    assert lines[1].strip() == "⚙ write_file  a.py  content=3 lines"
     assert "✔ row 0" in buf.getvalue() and "… 14 more lines" in buf.getvalue()
     assert "✖ Not found: x" in buf.getvalue()
 
@@ -304,16 +252,6 @@ def test_event_printer_shows_a_full_tool_turn(tmp_path: Path) -> None:
     assert "⚙ read_file  hello.txt" in output
     assert "✔     1  hi there" in output
     assert "The file says hi." in output
-
-
-def test_new_conversation_keeps_only_the_system_prompt() -> None:
-    buf = io.StringIO()
-    console = Console(file=buf, force_terminal=False, color_system=None)
-    messages = [Message.system("sys"), Message.user("hi"), Message.assistant("hello")]
-    context: dict[str, object] = {"messages": messages, "tokens": 99, "turns": 3}
-    handle_slash_command("/new", context, console)
-    assert messages == [Message.system("sys")]
-    assert context["tokens"] == 0 and context["turns"] == 0
 
 
 def test_long_paths_keep_their_filename_and_stay_on_one_line() -> None:

@@ -15,6 +15,7 @@ from rich.text import Text
 
 from nexus import __version__
 from nexus.brain.base import DEFAULT_CONTEXT_WINDOW
+from nexus.cli.preview import lines_phrase
 from nexus.cli.status import ServerStatus
 from nexus.cli.stream import TurnView
 from nexus.cli.theme import (
@@ -135,10 +136,21 @@ def _summarize_arguments(arguments: dict[str, Any], max_chars: int) -> str:
 
     if len(arguments) == 1:
         return short(next(iter(arguments.values())), max_chars)
+
+    # The first argument is what the call is about (a path, a command, a query), so it needs
+    # no label. Text with several lines, such as file contents, is reduced to its size.
+    (_, main), *others = arguments.items()
     share = max(12, max_chars // len(arguments))
-    return "  ".join(
-        f"{key}={short(value, share - len(key) - 1)}" for key, value in arguments.items()
-    )
+    parts = [short(main, share)]
+    for key, value in others:
+        is_multiline = isinstance(value, str) and "\n" in value.rstrip("\n")
+        shown = (
+            lines_phrase(len(value.splitlines()))
+            if is_multiline
+            else short(value, share - len(key) - 1)
+        )
+        parts.append(f"{key}={shown}")
+    return "  ".join(parts)
 
 
 def _server_address(base_url: str) -> str:

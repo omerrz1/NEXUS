@@ -31,7 +31,8 @@ def test_typing_slash_lists_every_command_with_a_description() -> None:
 
 def test_command_names_filter_as_you_type() -> None:
     completer = NexusCompleter(Path.cwd(), tool_names=[])
-    assert complete(completer, "/de") == ["/depth"]
+    assert complete(completer, "/dep") == ["/depth"]
+    assert complete(completer, "/de") == ["/depth", "/delete"]
     assert complete(completer, "/qu") == ["/quit"]
 
 
@@ -39,6 +40,7 @@ def test_command_arguments_are_offered() -> None:
     completer = NexusCompleter(Path.cwd(), tool_names=[])
     assert complete(completer, "/depth ") == ["fast", "balanced", "deep"]
     assert complete(completer, "/mode a") == ["ask", "auto"]
+    assert complete(completer, "/memory ") == ["add", "forget"]
 
 
 def test_only_registered_tools_are_offered() -> None:
@@ -61,6 +63,8 @@ def test_at_mentions_complete_file_paths(tmp_path: Path) -> None:
 def test_find_command_accepts_unambiguous_prefixes() -> None:
     assert find_command("/dep") is not None
     assert find_command("/t") is None  # /tools, /tool, /thoughts, /tokens
+    assert find_command("/re") is None  # /resume, /rename
+    assert find_command("/res") is not None
     assert find_command("/quit") is not None
 
 
@@ -80,6 +84,26 @@ def test_picker_number_keys_and_cancel() -> None:
     with create_pipe_input() as keys:
         keys.send_text("q")
         assert pick("Pick", choices, input=keys, output=DummyOutput()) is None
+
+
+def test_a_choice_can_be_picked_with_its_own_key() -> None:
+    choices = [
+        Choice("yes", "Yes", key="y"),
+        Choice("always", "Always", key="a"),
+        Choice("no", "No", key="n"),
+    ]
+    for pressed, expected in (("y", "yes"), ("a", "always"), ("n", "no")):
+        with create_pipe_input() as keys:
+            keys.send_text(pressed)
+            assert pick("Allow?", choices, input=keys, output=DummyOutput()) == expected
+
+
+def test_hotkeys_are_shown_next_to_their_choices() -> None:
+    from nexus.cli.picker import _PickerState
+
+    rows = _PickerState([Choice("y", "Yes", key="y"), Choice("x", "Other")], None).render("Allow?")
+    text = "".join(fragment[1] for fragment in rows)
+    assert "Yes (y)" in text and "Other (" not in text
 
 
 def test_settings_round_trip_and_bad_files(tmp_path: Path) -> None:

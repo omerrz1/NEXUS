@@ -15,6 +15,7 @@ from prompt_toolkit.styles import Style
 
 from nexus.cli.settings import DEPTH_CHOICES, MODE_CHOICES
 from nexus.cli.slash import SLASH_COMMANDS, find_command
+from nexus.cli.status import context_meter
 from nexus.cli.theme import BLUE, CYAN, GLOW, MUTED, OCEAN, SKY
 
 HISTORY_PATH = Path.home() / ".nexus" / "history"
@@ -23,6 +24,7 @@ _ARGUMENT_HINTS: dict[str, dict[str, str]] = {
     "/mode": {str(choice.value): choice.hint for choice in MODE_CHOICES},
     "/depth": {str(choice.value): choice.hint for choice in DEPTH_CHOICES},
     "/thoughts": {"toggle": "turn showing the model's reasoning on or off"},
+    "/memory": {"add": "save a note yourself", "forget": "delete a note by its number"},
 }
 
 _STYLE = Style.from_dict(
@@ -143,6 +145,9 @@ def _hotkeys(on_hotkey: Callable[[str], None]) -> KeyBindings:
 def _status_bar(session: dict[str, Any]) -> FormattedText:
     """The line under the input showing the live settings and the main shortcuts."""
     divider = (MUTED, "  │  ")
+    percent, meter_color = context_meter(
+        int(session.get("context_used", 0)), int(session.get("context_window", 0))
+    )
     return FormattedText(
         [
             (SKY, f" ◈ {session.get('model')}"),
@@ -152,6 +157,9 @@ def _status_bar(session: dict[str, Any]) -> FormattedText:
             divider,
             (MUTED, "depth "),
             (f"bold {CYAN}", str(session.get("depth"))),
+            divider,
+            (MUTED, "context "),
+            (f"bold {meter_color}", f"{percent}%"),
             divider,
             (MUTED, f"{int(session.get('tokens', 0)):,} tok"),
             (f"{MUTED} italic", "      / commands · @ files · ⇧⇥ mode · ^T depth"),

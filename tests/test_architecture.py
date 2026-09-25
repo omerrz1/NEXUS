@@ -9,7 +9,7 @@ from nexus.instructions.assemble import build_system_prompt
 from nexus.tools.registry import default_registry
 
 SOURCE = Path(__file__).parent.parent / "src" / "nexus"
-LEAF_PACKAGES = {"brain", "tools", "guardrails", "context", "instructions"}
+LEAF_PACKAGES = {"brain", "tools", "guardrails", "context", "instructions", "session"}
 
 
 def package_imports() -> dict[str, set[str]]:

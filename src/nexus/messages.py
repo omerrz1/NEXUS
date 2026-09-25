@@ -1,5 +1,6 @@
 """Shared immutable data models for conversation messages, tool calls, and token usage."""
 
+import json
 from dataclasses import dataclass, field
 from enum import StrEnum
 from typing import Any
@@ -56,6 +57,13 @@ class Usage:
         """Return a zeroed usage instance."""
         return cls(prompt_tokens=0, completion_tokens=0, total_tokens=0)
 
+    def __add__(self, other: "Usage") -> "Usage":
+        return Usage(
+            prompt_tokens=self.prompt_tokens + other.prompt_tokens,
+            completion_tokens=self.completion_tokens + other.completion_tokens,
+            total_tokens=self.total_tokens + other.total_tokens,
+        )
+
 
 @dataclass(frozen=True)
 class Message:
@@ -102,8 +110,6 @@ class Message:
         if self.tool_call_id is not None:
             payload["tool_call_id"] = self.tool_call_id
         if self.tool_calls:
-            import json
-
             payload["tool_calls"] = [
                 {
                     "id": tc.id,
@@ -116,3 +122,22 @@ class Message:
                 for tc in self.tool_calls
             ]
         return payload
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> "Message":
+        """Rebuild a message from the format `to_dict` produces, such as one read from disk."""
+        calls = tuple(
+            ToolCall(
+                id=call["id"],
+                name=call["function"]["name"],
+                arguments=json.loads(call["function"]["arguments"]),
+            )
+            for call in data.get("tool_calls", [])
+        )
+        return cls(
+            role=Role(data["role"]),
+            content=data["content"],
+            name=data.get("name"),
+            tool_call_id=data.get("tool_call_id"),
+            tool_calls=calls,
+        )

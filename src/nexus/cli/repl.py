@@ -11,13 +11,19 @@ from nexus.brain.base import DEFAULT_BASE_URL, DEFAULT_MODEL
 from nexus.cli.agent_events import EventPrinter
 from nexus.cli.prompt import build_prompt_session
 from nexus.cli.render import CliRenderer, hud_from_session
+from nexus.cli.session_commands import (
+    attach_session,
+    open_session,
+    print_resumed,
+    save_current,
+)
 from nexus.cli.settings import SETTING_CHOICES, Settings, apply_setting, next_choice
 from nexus.cli.slash import handle_slash_command
 from nexus.cli.status import current_git_branch, probe_server
 from nexus.cli.theme import MUTED, SKY
-from nexus.instructions.assemble import build_system_prompt
 from nexus.loop import Deps, run_agent
 from nexus.messages import Message
+from nexus.session.store import Session, SessionStore, make_title
 
 
 def run_repl(
@@ -28,8 +34,15 @@ def run_repl(
     base_url: str = DEFAULT_BASE_URL,
     animate_banner: bool = True,
     console: Console | None = None,
+    store: SessionStore | None = None,
+    resume: str | None = None,
 ) -> None:
-    """Show the banner, then read prompts and slash commands until the user exits."""
+    """Show the banner, then read prompts and slash commands until the user exits.
+
+    With a `store`, the conversation is saved after every turn. `resume` picks a saved
+    session to continue: "" for the latest one in this folder, or a list number or id.
+    """
+    current, warning = open_session(deps, store, resume)
     out = CliRenderer(console=console)
     out.show_raw_thoughts = settings.show_thinking
     # Session state shared with slash commands, which may read or change it (e.g. /mode).
@@ -46,11 +59,17 @@ def run_repl(
         "context_window": deps.brain.context_window,
         "renderer": out,
         "tools": deps.tools,
-        "messages": [Message.system(build_system_prompt(deps.ctx.workspace))],
         "last_reply": "",
+        "deps": deps,
+        "store": store,
     }
+    attach_session(session, current)
 
     _print_welcome(out, session, animate_banner)
+    if warning:
+        out.print_error(warning)
+    if current.turns:
+        print_resumed(current, deps.ctx.workspace, out.console)
     prompt = build_prompt_session(
         session,
         deps.tools.names(),
@@ -97,26 +116,44 @@ def _run_input_loop(
 
 
 def _run_agent_turn(user_input: str, deps: Deps, out: CliRenderer, session: dict[str, Any]) -> None:
-    """Run the agent on the user's message and update the session with the outcome."""
-    messages: list[Message] = session["messages"]
-    turn_start = len(messages)  # Where this turn begins, so it can be undone if it fails.
-    messages.append(Message.user(user_input))
-    printer = EventPrinter(out)
+    """Run the agent on the user's message, update the session, and save it."""
+    current: Session = session["current"]
+    messages = current.messages
+    if not current.title:
+        current.title = make_title(user_input)
+    request = Message.user(user_input)
+    messages.append(request)
+    printer = EventPrinter(out, deps.memory)
 
     try:
         result = run_agent(messages, deps, session["mode"], session["depth"], printer)
     except KeyboardInterrupt:
         printer.close()
-        del messages[turn_start:]  # Drop the half-finished turn so the history stays valid.
+        _drop_turn(messages, request)  # So the history stays valid.
         out.console.print(f"  [{MUTED}]Stopped.[/{MUTED}]\n")
         return
     except Exception as err:
         printer.close()
-        del messages[turn_start:]
+        _drop_turn(messages, request)
         out.print_error(f"Inference error: {err}\n")
         return
 
     session["speed"] = printer.speed
+    session["context_used"] = printer.context_tokens or session["context_used"]
     session["last_reply"] = result.final_text
     session["tokens"] += result.usage.total_tokens
     session["turns"] += 1
+    current.turns = session["turns"]
+    save_current(session, out.console)
+
+
+def _drop_turn(messages: list[Message], request: Message) -> None:
+    """Remove a turn that did not finish: the user's message and everything after it.
+
+    The message is found by identity, not position, because summarizing during the turn
+    may have shortened the list, and the user may have typed the same words before.
+    """
+    for index in range(len(messages) - 1, -1, -1):
+        if messages[index] is request:
+            del messages[index:]
+            return

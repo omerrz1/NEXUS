@@ -1,14 +1,14 @@
 # Nexus — Architecture
 
-> A local-first AI agent for the terminal. Local model, local tools, no network.
+> A local-first AI agent for the terminal. Local model, local tools. The one thing that leaves the machine is a web search, and only its search text, shown to the user first.
 
-**Status:** the brain, the CLI, the agent loop, five tools, and the core guardrails are built. Context compaction, sessions and undo, config files, and the remaining tools are planned. Language: Python 3.11+. The design is open to change.
+**Status:** the brain, the CLI, the agent loop, nine tools (files, commands, web search, a todo list, and session notes), the guardrails, context compaction, and saved sessions are built. Undo, config files, and the remaining tools are planned. Language: Python 3.11+. The design is open to change.
 
 ---
 
 ## 1. Goals and principles
 
-1. **Local only.** The only network traffic Nexus makes is HTTP to a model server on loopback. No telemetry, no update checks, no cloud fallback, no web tools. This is enforced in code (see §8), not just by convention.
+1. **Local by default.** The model, the tools, and every file stay on the machine. The only traffic that leaves it is the text of a `web_search`, which the user sees first (§5.5), and the model server is reached over loopback. No telemetry, no update checks, no cloud fallback. This is enforced in code and tests (see §8), not just by convention.
 2. **Built for small models.** Local models have smaller effective context windows and are less reliable at tool calling than hosted frontier models. Every choice below (few tools, strict schemas, errors fed back to the model, aggressive context budgeting) assumes this.
 3. **A small loop with pluggable parts.** Brain, tools, guardrails, and UI each sit behind an interface, so any of them can be swapped or mocked in tests.
 4. **Safe by default.** Workspace-jailed file access, approval for writes and commands, undo for every edit.
@@ -66,12 +66,12 @@ Three supporting layers make the five parts work well with a local model:
 
 **One user turn, step by step:**
 
-1. `context` assembles the messages (system prompt + history) within the token budget.
+1. `context` keeps the messages (system prompt + history) inside the token budget: it trims old tool output, and past about 70% it summarizes the oldest turns.
 2. `brain` sends them, plus the tool specs, to the local model server and streams back text and/or tool calls.
 3. If there are no tool calls, the model has answered and the loop ends.
 4. For each tool call: the arguments are validated, then `guardrails` returns **allow / ask / deny**.
 5. If allowed (or the user approves), the tool runs. Its output is capped and appended to the history.
-6. `session` logs every event and snapshots files before writes.
+6. After the turn, `session` saves the conversation with its todo list and notes. (Snapshots before writes, for undo, are planned.)
 7. The loop checks its stop conditions and goes back to step 1.
 
 ---
@@ -93,20 +93,25 @@ nexus/                                # repository root
 │   │
 │   ├── cli/                          # UI layer: the only place that touches the terminal
 │   │   ├── main.py                   # parse args, load settings, wire dependencies by hand, start
-│   │   ├── repl.py                   # interactive session
+│   │   ├── repl.py                   # interactive session: read input, run a turn, save it
 │   │   ├── oneshot.py                # `nexus -p "..."` non-interactive mode
 │   │   ├── doctor.py                 # `nexus doctor`: server reachable? model loaded? tool calls work?
 │   │   ├── prompt.py                 # the input line: / and @ completion menu, history, status bar
 │   │   ├── stream.py                 # one model turn, live: thinking animation, streamed Markdown
-│   │   ├── render.py                 # banner, settings card, tool and error cards
-│   │   ├── slash.py                  # the slash command list and its handlers
+│   │   ├── render.py                 # banner, details card, tool-call and result lines
+│   │   ├── slash.py                  # the slash command list, grouped /help, and the dispatcher
+│   │   ├── session_commands.py       # /new /sessions /resume /rename /delete, and opening a session
+│   │   ├── memory_commands.py        # /memory /todo /compact
+│   │   ├── tool_views.py             # /tools and /tool
 │   │   ├── settings.py               # mode / depth / reasoning settings, saved between sessions
-│   │   ├── picker.py                 # inline arrow-key menu
+│   │   ├── picker.py                 # inline arrow-key menu, with per-row hotkeys
+│   │   ├── approve.py                # the approval prompt (implements Approver)
+│   │   ├── preview.py                # draws a change: syntax-colored code, or a diff
+│   │   ├── todo_view.py              # the todo list as a checklist
 │   │   ├── export.py                 # /copy and /save
 │   │   ├── agent_events.py           # turns loop events into terminal output
-│   │   ├── status.py                 # server health probe and git branch for the details card
-│   │   ├── theme.py                  # colors and animation helpers
-│   │   └── approve.py                # y / n / always prompts (implements Approver)
+│   │   ├── status.py                 # server health probe, git branch, the context meter
+│   │   └── theme.py                  # colors and animation helpers
 │   │
 │   ├── brain/                        # talks to the model
 │   │   ├── base.py                   # Brain protocol, BrainReply, Depth
@@ -117,21 +122,28 @@ nexus/                                # repository root
 │   │
 │   ├── loop/                         # the agent loop
 │   │   ├── agent.py                  # run_agent(): the loop itself, and run_tool_call()
+│   │   ├── budget.py                 # fitting the prompt in the window: trim, then summarize
 │   │   ├── deps.py                   # Deps: everything the loop needs, passed in explicitly
 │   │   ├── stop.py                   # stop conditions: repeat detector, error streak
 │   │   └── events.py                 # event dataclasses and HaltReason
 │   │
 │   ├── tools/                        # what the model can do
-│   │   ├── base.py                   # Tool, ToolContext, ToolResult, Risk
+│   │   ├── base.py                   # Tool, ToolContext, ToolResult, Preview, Risk
 │   │   ├── registry.py               # the explicit tool list; get, names, specs
 │   │   ├── output.py                 # cap_text(): keep tool output inside the size limits
-│   │   └── builtin/
-│   │       ├── read_file.py          # numbered lines, paged
-│   │       ├── list_dir.py           # folder listing, shallow or a few levels deep
-│   │       ├── find_files.py         # find by name pattern, with time and match limits
-│   │       ├── write_file.py         # create or replace a file; previews a diff for approval
-│   │       ├── run_command.py        # bash, no stdin, timeout kills the process tree
-│   │       └── (planned)             # search_text, edit_file, update_todo
+│   │   ├── builtin/
+│   │   │   ├── read_file.py          # numbered lines, paged
+│   │   │   ├── list_dir.py           # folder listing, shallow or a few levels deep
+│   │   │   ├── find_files.py         # find by name pattern, with time and match limits
+│   │   │   ├── write_file.py         # create or replace a file; previews the code or a diff
+│   │   │   ├── run_command.py        # bash, no stdin, timeout kills the process tree
+│   │   │   ├── web_search.py         # DuckDuckGo search: titles, links, snippets
+│   │   │   ├── update_todo.py        # the model's checklist for multi-step work
+│   │   │   ├── remember.py           # save a session note
+│   │   │   ├── forget.py             # delete a session note
+│   │   │   └── (planned)             # search_text, edit_file
+│   │   └── web/
+│   │       └── duckduckgo.py         # reads DuckDuckGo's HTML results page; skips ads
 │   │
 │   ├── instructions/                 # what the model is told
 │   │   ├── assemble.py               # builds the system prompt from the layers
@@ -139,26 +151,27 @@ nexus/                                # repository root
 │   │   ├── environment.py            # cwd, OS, shell, date: a snapshot at session start
 │   │   └── prompts/                  # shipped prompt text as plain markdown, not string literals
 │   │       ├── core.md               # identity: a general AI agent, and its working style
-│   │       ├── tool_use.md           # how and when to call tools
+│   │       ├── tool_use.md           # how and when to call tools; search results are untrusted
 │   │       ├── working_rules.md      # look before changing, smallest change, check the result
+│   │       ├── compaction.md         # how to write the running summary (used by context/)
 │   │       └── (planned) plan_mode.md  # read-only addendum
 │   │
 │   ├── guardrails/                   # what the model may do
 │   │   ├── modes.py                  # Mode: read-only | ask | auto
 │   │   ├── policy.py                 # check_tool_call(tool, args, mode, ctx) -> Verdict
 │   │   ├── commands.py               # command denylist and the read-only safe list
-│   │   ├── approval.py               # Approval and the Approver interface
-│   │   └── network.py                # (planned) loopback-only enforcement
+│   │   ├── approval.py               # Approval, Answer, and the Approver interface
+│   │   └── network.py                # (planned) loopback-and-search-only enforcement
 │   │
 │   ├── context/                      # keeps the prompt inside the token budget
 │   │   ├── manager.py                # shrink_to_fit(): stub old tool output when space runs out
-│   │   ├── compaction.py             # (planned) summarize old turns
+│   │   ├── compaction.py             # summarize old turns into one message
 │   │   └── repomap.py                # (later) compact map of the repo
 │   │
-│   ├── session/                      # (planned)
-│   │   ├── log.py                    # append-only JSONL of every event
-│   │   ├── resume.py                 # rebuild state from a log
-│   │   └── checkpoints.py            # pre-write snapshots -> /undo
+│   ├── session/                      # what belongs to one conversation
+│   │   ├── memory.py                 # SessionMemory: the todo list and notes
+│   │   ├── store.py                  # Session, SessionStore: one JSON file per session
+│   │   └── checkpoints.py            # (planned) pre-write snapshots -> /undo
 │   │
 │   └── config/                       # (planned)
 │       ├── schema.py                 # config shape (pydantic, validated)
@@ -166,12 +179,13 @@ nexus/                                # repository root
 │
 └── tests/
     ├── conftest.py                   # autouse fixture: fail any non-loopback network connection
-    ├── test_cli.py, test_cli_interactive.py
+    ├── test_cli*.py                  # rendering, slash commands, approval, sessions, previews
     ├── test_brain/                   # includes the malformed-output corpus for the parser
-    ├── test_tools/
+    ├── test_tools/                   # built-in tools, web search over a mock transport
     ├── test_guardrails/              # adversarial command and policy tests
-    ├── test_loop/                    # full loop against the mock brain
-    ├── test_context/
+    ├── test_loop/                    # full loop against the mock brain, including compaction
+    ├── test_context/                 # trimming and summarizing
+    ├── test_session/                 # the store and session memory
     ├── test_architecture.py          # import scan enforcing the dependency rule; prompt budget
     └── evals/                        # (planned) real-model task suite, run on demand
 ```
@@ -379,6 +393,8 @@ class ReadFile(Tool[ReadFileArgs]):
 - **Output is plain text sized for a small context.** Hard cap (default 8 KB / 200 lines) with a footer that tells the model how to get more, e.g. `showing lines 1-200 of 1340; call read_file with offset=200`.
 - **Errors are results, not exceptions.** Return `ToolResult.error(...)` with a short, actionable message the model can act on.
 - **Tools never check permissions.** Guardrails decide before `run` is called; `path_fields` is how they know which arguments to jail-check.
+- **A tool that can need approval describes what it will do** with a `Preview`: plain data (a title, and for a file write its path, current contents, and new contents; for a command or search, the text). The terminal decides how to draw it, so tools stay free of UI code.
+- **Schemas are flat.** Nested argument models are expanded in `Tool.spec()` (no `$ref` or `$defs`), because small models read one flat schema more reliably and it costs fewer tokens.
 - **Registration is a plain list** in `registry.py`. No decorators or auto-discovery, so reading one file tells you every tool that exists.
 - **Keep the tool count small** (about 8-10). Each tool costs prompt tokens and increases the chance of a wrong choice.
 
@@ -389,11 +405,15 @@ class ReadFile(Tool[ReadFileArgs]):
 | `read_file` | read | Numbered lines; `offset` / `limit` for paging |
 | `list_dir` | read | Directory listing, shallow by default |
 | `find_files` | read | Find files by glob pattern |
-| `search_text` | read | Search file contents (uses `rg` if installed, built-in fallback otherwise) |
-| `write_file` | write | Create a file or fully overwrite one |
-| `edit_file` | write | Exact-match replace (see below); returns a unified diff |
+| `search_text` | read | *(planned)* Search file contents (uses `rg` if installed, built-in fallback otherwise) |
+| `write_file` | write | Create a file or fully overwrite one; previews the code or a diff |
+| `edit_file` | write | *(planned)* Exact-match replace (see below); returns a unified diff |
 | `run_command` | exec | Run a shell command in the workspace, with timeout and output cap |
-| `update_todo` | none | A scratchpad task list the model maintains; acts as external working memory |
+| `web_search` | network | Search DuckDuckGo: titles, links, and snippets. Cannot open the pages |
+| `update_todo` | none | The model's checklist for multi-step work; the whole list is sent each time. Survives summarizing |
+| `remember` / `forget` | none | Save or delete a short session note (at most 20, 300 characters each). Survives summarizing |
+
+The `none`-risk tools only change Nexus's own session memory, never the user's files, so they never need approval. Their state lives in one `SessionMemory` object that the tools, the loop, and the CLI share (§5.7).
 
 **`edit_file` is the most failure-prone tool with small models**, so it is built defensively: `old_string` must match exactly once (or `replace_all` is set); a whitespace-tolerant fallback match is tried before failing; on failure it returns the closest matching region so the model can correct itself instead of guessing.
 
@@ -431,10 +451,12 @@ validate args -> path jail -> command rules -> policy (mode x risk) -> approval 
 | `read` | allow | allow | allow |
 | `write` | deny | ask, showing a diff | allow inside the workspace (no undo yet), ask outside it |
 | `exec` | deny, except safe-listed commands | ask, unless safe-listed | allow, unless denylisted |
+| `network` | ask | ask | allow |
+| `none` | allow | allow | allow |
 
 **Rules no mode can override:**
 
-- **Reading is allowed anywhere.** The agent may list, find, and read files on the whole computer so it can help with anything on it. Nothing it reads can leave the machine: there are no network tools and network commands are denied. Paths are resolved (symlinks included) before any check.
+- **Reading is allowed anywhere.** The agent may list, find, and read files on the whole computer so it can help with anything on it. That was safe because nothing it read could leave the machine, and `web_search` changes that: the model can put what it read into a query. So every mode except `auto` shows the exact query and asks first, and the prompt to the model says that search results are data, never instructions. Network commands in `run_command` are still denied. Paths are resolved (symlinks included) before any check.
 - **Writing outside the workspace always asks**, even in `auto` mode, and never happens in `read-only` mode. A symlink that leads out of the workspace counts as outside. (This replaces the original rule that confined every path to the workspace.)
 - **Command denylist** (`commands.py`). Always denied: privilege escalation (`sudo`, `su`), network tools (`curl`, `wget`, `ssh`, `scp`, `nc`, ...), remote git operations (`push`, `pull`, `fetch`, `clone`), and destructive patterns such as `rm -rf` on `/`, `~`, or the workspace root.
 - **Scrubbed environment.** `run_command` runs with the workspace as its working directory and an environment stripped of inherited secrets (tokens, API keys, cloud credentials).
@@ -451,11 +473,25 @@ class Approval(StrEnum):
     DENY = "deny"
 
 
+@dataclass(frozen=True)
+class Answer:
+    approval: Approval
+    instead: str = ""      # for a refusal: what the user wants done instead
+
+
 class Approver(Protocol):
-    def approve(self, call: ToolCall, preview: str | None, scope: str) -> Approval: ...
+    def approve(self, call: ToolCall, preview: Preview | None, scope: str) -> Answer: ...
 ```
 
-`SESSION` grants are scoped by the tool's `grant_scope`, not just its name, and last only for the current session: "always" for `run_command` covers one program (say `git`), and for `write_file` covers the working directory, or one file elsewhere.
+`SESSION` grants are scoped by the tool's `grant_scope`, not just its name, and last only for the current session: "always" for `run_command` covers one program (say `git`), and for `write_file` covers the working directory, or one file elsewhere. When the user declines with a note, the loop hands it to the model ("The user declined this action and said: ... Do that instead"), so a refusal steers the model instead of stopping it.
+
+**The approval prompt** (`cli/approve.py`, `cli/preview.py`) is built so that approving code means seeing it:
+
+- The change is drawn in a panel titled with a short path: new files as syntax-colored code with line numbers, changes as a diff of only the changed lines with a little context. A command or search is shown as typed.
+- Long changes are cut at 40 lines. When that happens, the first menu entry is "View the N lines not shown", which opens the whole change in a pager, so pressing enter never approves code the user has not seen.
+- The answer is one keypress in a menu (arrows and enter, a number, or a hotkey): `y` yes, `a` yes and do not ask again for that scope, `n` no, `t` no and tell Nexus what to do instead. Escape declines.
+- Keys typed while the model was working are discarded before the menu appears, so they cannot answer for the user.
+- Without a terminal (a pipe, or `-p`), it falls back to typing `y`, `a`, or `n`.
 
 **Safe commands need no approval.** A single read-only command, or a pipe of them (`ls`, `cat`, `grep`, `git status`, `find` without `-delete` or `-exec`, and a few more), runs without asking in every mode except when it is denylisted. Anything with `;`, `&&`, redirection, or substitution asks.
 
@@ -477,7 +513,15 @@ When usage crosses about 70% of the budget, compaction runs in two passes, cheap
 
 Token counts are estimated locally and corrected with the real `usage` numbers the server returns.
 
-**What is built so far.** Only pass 1, and it runs when the conversation would overflow rather than at 70%. Before each model call the loop keeps room free for the reply (a quarter of the window when the model thinks, an eighth when it does not, at least 512 to 1024 tokens) and asks `shrink_to_fit` to stub the oldest tool outputs until the prompt fits. If it still does not fit, the loop stops with `CONTEXT_FULL` and suggests `/new`.
+**How it works.** Before each model call, `loop/budget.py` sizes the prompt budget: the window, minus room for the reply (a quarter of the window when the model thinks, an eighth when it does not, at least 512 to 1024 tokens), minus the tool specs. Above 70% of it, pass 1 stubs the oldest tool outputs (`shrink_to_fit`). If that is not enough, pass 2 (`context/compaction.py`) runs:
+
+- The newest messages worth about 30% of the budget are kept word for word. The kept part never starts with a tool result, because that must stay next to the assistant message that asked for it, so the newest tool call and its results are always kept.
+- Everything older is summarized by the model with thinking off, into one message that follows the system prompt (a user-role message starting `[Summary of the earlier conversation]`, since some chat templates only allow a system message first). The old part can be bigger than the window: it is summarized a block at a time, each block together with the summary so far. An earlier summary is carried forward, never stacked.
+- The todo list and notes are copied into the summary unchanged, after the model's text, so they survive every compaction.
+- The turn's request is never lost. If a turn runs so long that its own early steps must be summarized, the user's message is put back right after the summary, word for word (`compact()` finds it by identity, not by equal text).
+- If the model writes no summary, the conversation is left as it was and the loop stops with `CONTEXT_FULL` (which now only happens when even the newest tool call and results cannot fit).
+
+The summary call is counted in the turn's usage. `/compact` runs the same thing on demand, and the status bar shows the real window use, from the server's own counts.
 
 **Estimates are calibrated.** The local estimate runs about 25% low for code and markdown, so the loop starts with a cautious 1.3x factor and replaces it with the ratio of the server's real `prompt_tokens` to its own estimate after every reply. Tool output is also capped at half the window in bytes (`ToolContext.for_window`).
 
@@ -487,15 +531,22 @@ Token counts are estimated locally and corrected with the real `usage` numbers t
 
 ### 5.7 Session (`nexus/session/`)
 
-- **Log.** Every event is appended to `~/.nexus/sessions/<id>.jsonl`. This is local, replayable, and doubles as raw material for eval tasks.
-- **Resume.** `nexus --resume` rebuilds `AgentState` from a log.
-- **Checkpoints.** Before any write tool runs, the affected files are copied to `.nexus/checkpoints/<session>/<step>/`. `/undo` restores the last step. It does not depend on git.
+A session is one conversation plus what belongs to it.
+
+- **Memory** (`memory.py`). `SessionMemory` holds the todo list and the notes. It is one shared, mutable object: the `update_todo`, `remember`, and `forget` tools were built with it, the loop reads it to pin it into summaries, and the CLI shows it. `/new` and `/resume` reload it in place, so the tools never point at stale data.
+- **Store** (`store.py`). One JSON file per session in `~/.nexus/sessions/`, holding the messages, the memory, a title, and timestamps. The folder is `0700` and files are `0600`, because a conversation can contain private file contents. Files are written to a temporary name and moved into place, so a crash never leaves half a file. Ids are a date, a time, and four random hex digits, and anything else is refused before it reaches the filesystem, so `/resume ../x` cannot become a path. A session is saved after each finished turn; one with no finished turn is not saved. Damaged files are skipped when listing.
+- **Resume.** `nexus --resume` continues the latest session started in this folder, `--resume 2` or `--resume <id-prefix>` picks one by its number in `/sessions` or its id. The system prompt is rebuilt on resume so the environment block shows today's date and folder. If the session was started elsewhere, Nexus says so.
+- **What survives.** The saved messages are the live conversation, so a summary made by compaction is what is stored; the summarized-away messages are not kept.
+- **Checkpoints** *(planned).* Before any write tool runs, the affected files are copied to `.nexus/checkpoints/<session>/<step>/`. `/undo` restores the last step. It does not depend on git.
+
+Undoing an aborted turn (Ctrl-C or an error) removes the user's message and everything after it, found by identity, because summarizing during the turn can shorten the list.
 
 ### 5.8 CLI (`nexus/cli/`)
 
 - **Modes:** interactive REPL (`nexus`), one-shot (`nexus -p "..."`), and `nexus doctor`.
-- **Flags:** `--mode`, `--model`, `--resume`, `--config`.
-- **Slash commands:** `/help` `/clear` `/undo` `/mode` `/model` `/compact` `/resume`.
+- **Flags:** `--mode`, `--depth`, `--model`, `--base-url`, `--context-window`, `--resume [SESSION]`, `--no-anim`.
+- **Slash commands**, grouped in `/help`: `/new` `/sessions` `/resume` `/rename` `/delete` `/compact` `/clear` · `/memory` `/todo` · `/settings` `/mode` `/depth` `/thoughts` · `/model` `/tools` `/tool` `/doctor` · `/copy` `/save` `/stats` `/tokens` · `/help` `/exit`. (`/undo` comes with checkpoints.) The list lives in one place, `SLASH_COMMANDS`, and a test checks that every command is in a help group.
+- **Plan and context are visible.** When the model updates its todo list, the CLI draws a checklist card instead of the tool's plain-text reply, and the status bar shows how full the context window is (green, amber above 60%, red above 85%).
 - **`rich` draws output and `prompt_toolkit` reads input.** The input line has a completion menu (`/` commands with descriptions, `@` file mentions), history with inline suggestions, a status bar, and hotkeys (Shift-Tab cycles the mode, Ctrl-T cycles the thinking depth). Settings are chosen with inline arrow-key pickers and saved to `~/.nexus/settings.json`; command-line flags override them for one run.
 - **Installed as a command** via a `pyproject.toml` entry point (`nexus = "nexus.cli.main:main"`).
 
@@ -567,13 +618,13 @@ The largest risk in a local agent is not the architecture; it is a smaller model
 
 ## 8. Local-only enforcement
 
-"Nothing is external" is a requirement, so it is checked by code and tests rather than trusted.
+"Nothing leaves the machine except a search you approve" is a requirement, so it is checked by code and tests rather than trusted.
 
 1. **Loopback check.** At startup, `guardrails/network.py` resolves the model URL and refuses anything that is not loopback (`127.0.0.0/8`, `::1`, `localhost`, or a unix socket).
 2. **Runtime socket guard.** The same module wraps `socket.socket.connect` so any non-loopback connection raises `NetworkGuardError`. This covers the whole Nexus process, including every dependency. It does not cover child processes started by `run_command`; those are handled by the command denylist now and the OS sandbox in v2.
 3. **No hidden traffic.** No telemetry, crash reporting, update checks, or remote config. Each dependency is checked for network calls before it is added.
 4. **CI proof.** An autouse pytest fixture in `tests/conftest.py` fails any test that attempts a non-loopback connection.
-5. **No web tools.** There is no fetch or search tool. It is a non-goal for v1 and conflicts with principle 1.
+5. **One network tool, and it asks.** `web_search` is the only tool that talks to the internet. It sends only the query, through DuckDuckGo's plain-HTML page, and the user sees the exact text first in every mode except `auto`. There is no fetch or browse tool. Its tests run over a mock transport, so the CI guard in item 4 still fails any real outside connection. When `guardrails/network.py` is built, its socket guard must allow the loopback model server and this one search host, and nothing else.
 6. **Models are not Nexus's business.** Nexus never downloads weights; getting a model onto disk is a user action outside Nexus.
 
 ---
@@ -624,13 +675,16 @@ The eval harness is how we pick a model and tune prompts by measurement instead 
 | 7 | Default mode | `ask` | Safe default; `auto` is opt-in | Approvals become friction for common commands |
 | 8 | Agent topology | Single loop | Sub-agents multiply context cost, which is scarce locally | Tasks routinely exceed one context window |
 | 9 | Model choice | Decide with the eval harness; it is config, not code | Avoids committing before measuring | n/a |
+| 10 | Web search | Scrape DuckDuckGo's HTML page directly with `httpx` and the standard library parser; skip ads | No key, no account, no new dependency. It is brittle by nature: the page needs a browser-like `User-Agent`, and DuckDuckGo answers a challenge page when it limits requests, which the tool reports as "may be limiting requests" | The markup changes, or blocks become common; then add a backend behind a small protocol (a local SearXNG instance would keep Nexus's own traffic on loopback) |
+| 11 | Sessions | One JSON file per session, rewritten after each turn | Compaction rewrites the history, so an append-only log would need replaying; a snapshot is simple and readable | Sessions grow large, or evals need the full raw history |
+| 12 | Summaries | The model summarizes, at about 70% of the budget, keeping the newest 30% verbatim | Cheapest-first (stub, then summarize) keeps most detail, and a rolling summary works on any window size | Summaries lose facts that matter; then pin more, or summarize earlier |
 
 ---
 
 ## 12. Non-goals for v1
 
 - Cloud or remote model providers
-- Web browsing, fetch, or search tools
+- Fetching or browsing web pages (search results only)
 - Multi-agent orchestration
 - IDE integration
 - Plugin marketplace

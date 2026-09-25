@@ -1,18 +1,17 @@
 """The agent loop: ask the model, run the tools it requests, repeat until it answers."""
 
-import json
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from enum import Enum, auto
 from typing import Any
 
 from pydantic import BaseModel, ValidationError
 
 from nexus.brain.base import BrainReply, Depth
-from nexus.brain.tokens import estimate_conversation_tokens, estimate_tokens
-from nexus.context.manager import shrink_to_fit
+from nexus.brain.tokens import estimate_conversation_tokens
 from nexus.guardrails.approval import Approval
 from nexus.guardrails.modes import Mode
 from nexus.guardrails.policy import Decision, check_tool_call
+from nexus.loop.budget import DEFAULT_SCALE, make_room, next_scale, spec_tokens
 from nexus.loop.deps import Deps
 from nexus.loop.events import (
     EventHandler,
@@ -31,9 +30,6 @@ from nexus.loop.stop import Signal, StopTracker
 from nexus.messages import Message, ToolCall, Usage
 from nexus.tools.base import Tool, ToolResult
 
-# Local token estimates run low for code and markdown (about 3 characters per token, not 4),
-# so start out cautious and correct from the server's real counts after the first reply.
-_DEFAULT_SCALE = 1.3
 _EMPTY_REPLY_NUDGE = "You did not write an answer. Write your answer to the user now."
 _REPEAT_WARNING = (
     "\n(You have made this exact call several times with the same result. "
@@ -82,21 +78,26 @@ def run_agent(
     """
     stop = StopTracker()
     usage = Usage.empty()
-    spec_tokens = _spec_tokens(deps)
-    scale = _DEFAULT_SCALE
+    request = messages[-1]  # What the user asked; compaction never folds it into a summary.
+    tool_spec_tokens = spec_tokens(deps)
+    scale = DEFAULT_SCALE
     retry_without_thinking = False
     for step in range(1, deps.max_steps + 1):
         # After an empty reply, ask again without thinking so the model answers directly.
         step_depth = Depth.FAST if retry_without_thinking else depth
         retry_without_thinking = False
-        if not _make_room(messages, deps, step_depth, spec_tokens, scale):
+        fits, spent = make_room(
+            messages, deps, step_depth, tool_spec_tokens, scale, request, on_event
+        )
+        usage = usage + spent
+        if not fits:
             return _halted(HaltReason.CONTEXT_FULL, usage, deps, on_event)
 
-        sent_estimate = estimate_conversation_tokens(messages) + spec_tokens
+        sent_estimate = estimate_conversation_tokens(messages) + tool_spec_tokens
         on_event(ModelStarted(step))
         reply = _ask_model(messages, deps, step_depth, on_event)
-        scale = _next_scale(sent_estimate, reply.usage, scale)
-        usage = _add(usage, reply.usage)
+        scale = next_scale(sent_estimate, reply.usage, scale)
+        usage = usage + reply.usage
 
         if reply.cut_off:
             # A reply that hit the length limit may hold half a tool call, so nothing runs.
@@ -147,35 +148,6 @@ def _handle_reply(
         return StepOutcome.RETRY_WITHOUT_THINKING
     messages.append(reply.message)
     return StepOutcome.ANSWERED
-
-
-def _spec_tokens(deps: Deps) -> int:
-    """Estimated tokens the tool specs add to every request."""
-    return estimate_tokens(json.dumps([spec.to_dict() for spec in deps.tools.specs()]))
-
-
-def _answer_room(window: int, depth: Depth) -> int:
-    """Tokens kept free for the reply. Thinking happens in the same window as the answer."""
-    if depth is Depth.FAST:
-        return max(512, window // 8)
-    return max(1024, window // 4)
-
-
-def _next_scale(estimated: int, usage: Usage, current: float) -> float:
-    """Correct the local estimate using the prompt size the server actually counted."""
-    if usage.prompt_tokens <= 0 or estimated <= 0:
-        return current
-    return min(max(usage.prompt_tokens / estimated, 0.5), 3.0)
-
-
-def _make_room(
-    messages: list[Message], deps: Deps, depth: Depth, spec_tokens: int, scale: float
-) -> bool:
-    """Trim old tool output so the prompt plus room for the reply fits the window."""
-    window = deps.brain.context_window
-    # Estimates are multiplied by `scale` to get real tokens, so divide the budget by it.
-    budget = (window - _answer_room(window, depth)) / scale - spec_tokens
-    return shrink_to_fit(messages, int(budget))
 
 
 def _ask_model(
@@ -233,8 +205,8 @@ def run_tool_call(call: ToolCall, deps: Deps, mode: Mode, on_event: EventHandler
         answer = deps.approver.approve(
             call, tool.preview(args, deps.ctx), tool.grant_scope(args, deps.ctx)
         )
-        if answer is Approval.DENY:
-            return ToolResult.error("The user declined this action. Ask what they want instead.")
+        if answer.approval is Approval.DENY:
+            return ToolResult.error(_declined_message(answer.instead))
 
     on_event(ToolStarted(call))
     return _execute(tool, args, deps)
@@ -245,6 +217,12 @@ def _execute(tool: Tool[Any], args: BaseModel, deps: Deps) -> ToolResult:
         return tool.run(args, deps.ctx)
     except Exception as err:  # A bug in one tool must not end the whole session.
         return ToolResult.error(f"{tool.name} failed unexpectedly: {err}")
+
+
+def _declined_message(instead: str) -> str:
+    if instead:
+        return f'The user declined this action and said: "{instead}". Do that instead.'
+    return "The user declined this action. Ask what they want instead."
 
 
 def _invalid_arguments_message(tool: Tool[Any], err: ValidationError) -> str:
@@ -258,15 +236,6 @@ def _invalid_arguments_message(tool: Tool[Any], err: ValidationError) -> str:
 def _unreadable_call_message(errors: tuple[str, ...]) -> str:
     details = " ".join(errors)
     return f"Your tool call could not be read: {details} Call the tool again with valid JSON."
-
-
-def _add(total: Usage, more: Usage) -> Usage:
-    return replace(
-        total,
-        prompt_tokens=total.prompt_tokens + more.prompt_tokens,
-        completion_tokens=total.completion_tokens + more.completion_tokens,
-        total_tokens=total.total_tokens + more.total_tokens,
-    )
 
 
 def _halted(

@@ -19,11 +19,16 @@ Value = TypeVar("Value")
 
 @dataclass(frozen=True)
 class Choice(Generic[Value]):
-    """One row in a picker: the value it returns, its label, and an optional hint."""
+    """One row in a picker: the value it returns, its label, an optional hint, and a hotkey.
+
+    Pressing the hotkey picks the row at once. Keep hotkeys apart from j, k, and q, which
+    the picker uses itself.
+    """
 
     value: Value
     label: str
     hint: str = ""
+    key: str = ""
 
 
 _STYLE = Style.from_dict(
@@ -57,6 +62,8 @@ class _PickerState(Generic[Value]):
             is_selected = position == self.index
             rows.append(("class:pointer", " ❯ " if is_selected else "   "))
             rows.append(("class:selected" if is_selected else "class:label", choice.label))
+            if choice.key:
+                rows.append(("class:keys", f" ({choice.key})"))
             if choice.value == self.current:
                 rows.append(("class:current", " ✔"))
             if choice.hint:
@@ -101,6 +108,9 @@ def pick(
 
     for number in range(1, min(len(choices), 9) + 1):
         bindings.add(str(number))(_make_jump(state, number - 1))
+    for choice in choices:
+        if choice.key:
+            bindings.add(choice.key)(_make_pick(choice.value))
 
     control = FormattedTextControl(lambda: state.render(title), show_cursor=False)
     app: Application[Value | None] = Application(
@@ -113,6 +123,15 @@ def pick(
         output=output,
     )
     return app.run()
+
+
+def _make_pick(value: Value) -> Callable[[KeyPressEvent], None]:
+    """Build the handler that returns `value` when a choice's hotkey is pressed."""
+
+    def pick_value(event: KeyPressEvent) -> None:
+        event.app.exit(result=value)
+
+    return pick_value
 
 
 def _make_jump(state: _PickerState[Value], index: int) -> Callable[[KeyPressEvent], None]:

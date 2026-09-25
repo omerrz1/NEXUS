@@ -9,7 +9,7 @@ import subprocess
 
 from pydantic import BaseModel, Field
 
-from nexus.tools.base import Risk, Tool, ToolContext, ToolResult
+from nexus.tools.base import Preview, Risk, Tool, ToolContext, ToolResult
 from nexus.tools.output import cap_text
 
 # Environment variables whose names suggest a secret are not passed to commands.
@@ -68,8 +68,8 @@ class RunCommand(Tool[RunCommandArgs]):
             truncated=truncated,
         )
 
-    def preview(self, args: RunCommandArgs, ctx: ToolContext) -> str | None:
-        return f"$ {args.command}\n(in {ctx.workspace})"
+    def preview(self, args: RunCommandArgs, ctx: ToolContext) -> Preview | None:
+        return Preview("Run a command", body=f"$ {args.command}\n(in {ctx.workspace})")
 
     def grant_scope(self, args: RunCommandArgs, ctx: ToolContext) -> str:
         """ "Always allow" covers one program, such as git, and not every command."""

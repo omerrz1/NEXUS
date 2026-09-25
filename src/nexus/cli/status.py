@@ -8,6 +8,7 @@ from pathlib import Path
 import httpx
 
 from nexus.brain.openai_compat import is_loopback_url
+from nexus.cli.theme import ERROR, OK, WARN
 
 
 @dataclass(frozen=True)
@@ -64,3 +65,17 @@ def current_git_branch(folder: Path) -> str | None:
     if result.returncode != 0:
         return None
     return result.stdout.strip() or None  # Empty output means a detached HEAD.
+
+
+_WARN_AT = 60  # Percent of the window used before the meter turns amber.
+_DANGER_AT = 85  # ...and red. The loop starts summarizing at 70.
+
+
+def context_meter(used_tokens: int, window: int) -> tuple[int, str]:
+    """How full the context window is, as a percentage and the color to show it in."""
+    percent = round(100 * used_tokens / window) if window > 0 else 0
+    if percent >= _DANGER_AT:
+        return percent, ERROR
+    if percent >= _WARN_AT:
+        return percent, WARN
+    return percent, OK

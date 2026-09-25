@@ -10,7 +10,7 @@ from nexus.brain.mock import MockBrain
 from nexus.guardrails.approval import Approval
 from nexus.guardrails.modes import Mode
 from nexus.loop import Event, HaltReason, RunResult, run_agent
-from nexus.loop.agent import _answer_room, _next_scale
+from nexus.loop.budget import answer_room, next_scale
 from nexus.loop.events import Halted, Notice, TextDelta, ToolStarted
 from nexus.messages import Message, Role, ToolCall, Usage
 from tests.helpers import ScriptedApprover, make_deps
@@ -97,7 +97,8 @@ def test_ask_mode_asks_before_writing_and_writes_when_approved(tmp_path: Path) -
     run(tmp_path, brain, approver)
     assert (tmp_path / "out.txt").read_text() == "data"
     (name, preview, scope) = approver.requests[0]
-    assert name == "write_file" and "Create" in (preview or "") and "working directory" in scope
+    assert name == "write_file" and "working directory" in scope
+    assert preview is not None and preview.title == "Create out.txt" and preview.after == "data"
 
 
 def test_declined_action_does_not_run_and_the_model_is_told(tmp_path: Path) -> None:
@@ -117,6 +118,16 @@ def test_read_only_mode_refuses_without_asking(tmp_path: Path) -> None:
     messages, _, _ = run(tmp_path, brain, approver, mode=Mode.READ_ONLY)
     assert approver.requests == [] and not (tmp_path / "x").exists()
     assert "Not allowed" in tool_messages(messages)[0].content
+
+
+def test_what_the_user_says_when_declining_reaches_the_model(tmp_path: Path) -> None:
+    approver = ScriptedApprover(Approval.DENY, instead="use tabs, not spaces")
+    brain = MockBrain()
+    script(brain, call("write_file", path="out.txt", content="data"), "ok, tabs it is")
+    messages, _, _ = run(tmp_path, brain, approver)
+    told = tool_messages(messages)[0].content
+    assert 'said: "use tabs, not spaces"' in told and "Do that instead" in told
+    assert not (tmp_path / "out.txt").exists()
 
 
 def test_denylisted_command_is_refused_even_in_auto_mode(tmp_path: Path) -> None:
@@ -280,15 +291,15 @@ def test_repeated_empty_replies_halt(tmp_path: Path) -> None:
 
 
 def test_token_estimate_is_corrected_by_what_the_server_counted() -> None:
-    assert _next_scale(1000, Usage(prompt_tokens=1400), current=1.3) == 1.4
-    assert _next_scale(1000, Usage(), current=1.3) == 1.3  # no server count: keep the old value
-    assert _next_scale(1000, Usage(prompt_tokens=90000), current=1.3) == 3.0  # clamped
+    assert next_scale(1000, Usage(prompt_tokens=1400), current=1.3) == 1.4
+    assert next_scale(1000, Usage(), current=1.3) == 1.3  # no server count: keep the old value
+    assert next_scale(1000, Usage(prompt_tokens=90000), current=1.3) == 3.0  # clamped
 
 
 def test_reply_room_is_larger_when_the_model_thinks() -> None:
-    assert _answer_room(4096, Depth.FAST) == 512
-    assert _answer_room(4096, Depth.BALANCED) == 1024
-    assert _answer_room(32768, Depth.DEEP) == 8192
+    assert answer_room(4096, Depth.FAST) == 512
+    assert answer_room(4096, Depth.BALANCED) == 1024
+    assert answer_room(32768, Depth.DEEP) == 8192
 
 
 def test_trimming_starts_sooner_when_the_server_reports_more_tokens(tmp_path: Path) -> None:

@@ -76,3 +76,17 @@ def test_the_denial_reason_tells_the_model_how_to_proceed(ctx: ToolContext) -> N
     assert tool is not None
     verdict = check_tool_call(tool, tool.args_model(path="a", content=""), Mode.READ_ONLY, ctx)
     assert "read-only" in verdict.reason and "/mode" in verdict.reason
+
+
+def test_web_search_asks_unless_the_mode_is_auto(ctx: ToolContext) -> None:
+    # What is searched for could include things the model read, so the user sees it first.
+    assert decide(ctx, Mode.READ_ONLY, "web_search", query="python") is Decision.ASK
+    assert decide(ctx, Mode.ASK, "web_search", query="python") is Decision.ASK
+    assert decide(ctx, Mode.AUTO, "web_search", query="python") is Decision.ALLOW
+
+
+@pytest.mark.parametrize("mode", list(Mode))
+def test_session_memory_tools_never_need_approval(ctx: ToolContext, mode: Mode) -> None:
+    assert decide(ctx, mode, "remember", note="likes tabs") is Decision.ALLOW
+    assert decide(ctx, mode, "forget", number=1) is Decision.ALLOW
+    assert decide(ctx, mode, "update_todo", items=[]) is Decision.ALLOW

@@ -1,21 +1,27 @@
 """Slash command parser and handlers for the interactive CLI REPL."""
 
-import json
 from dataclasses import dataclass
 from typing import Any
 
 from rich.console import Console
-from rich.panel import Panel
-from rich.syntax import Syntax
+from rich.markup import escape
 from rich.table import Table
 
 from nexus.brain.base import DEFAULT_BASE_URL, DEFAULT_MODEL
 from nexus.cli.export import copy_last_code, save_session
+from nexus.cli.memory_commands import compact_conversation, handle_memory, show_todo
 from nexus.cli.render import CliRenderer, hud_from_session
+from nexus.cli.session_commands import (
+    delete_session,
+    rename_session,
+    resume_session,
+    show_sessions,
+    start_new_session,
+)
 from nexus.cli.settings import choose_setting, handle_thoughts, open_settings_menu
-from nexus.cli.status import probe_server
+from nexus.cli.status import context_meter, probe_server
 from nexus.cli.theme import CYAN, MUTED, SKY
-from nexus.tools.base import Risk
+from nexus.cli.tool_views import show_tool_detail, show_tools
 from nexus.tools.registry import ToolRegistry, default_registry
 
 
@@ -47,17 +53,29 @@ SLASH_COMMANDS: tuple[SlashCommand, ...] = (
     SlashCommand("/stats", "/stats", "Show turn and token statistics"),
     SlashCommand("/tokens", "/tokens", "Show session token usage"),
     SlashCommand("/doctor", "/doctor", "Run diagnostic checks on the local model server"),
-    SlashCommand("/new", "/new", "Start a new conversation (frees up the model's memory)"),
+    SlashCommand("/new", "/new", "Save this session and start a fresh one"),
+    SlashCommand("/sessions", "/sessions", "List saved sessions"),
+    SlashCommand("/resume", "/resume [number|id]", "Continue a saved session"),
+    SlashCommand("/rename", "/rename <title>", "Rename this session"),
+    SlashCommand("/delete", "/delete [number|id]", "Delete a saved session"),
+    SlashCommand("/memory", "/memory [add|forget]", "Show or edit this session's notes"),
+    SlashCommand("/todo", "/todo", "Show the model's task list"),
+    SlashCommand("/compact", "/compact", "Summarize the older conversation now"),
     SlashCommand("/clear", "/clear", "Clear the screen"),
     SlashCommand("/exit", "/exit", "Exit Nexus", ("/quit",)),
 )
 
-_RISK_COLORS: dict[Risk, str] = {
-    Risk.NONE: "dim",
-    Risk.READ: "green",
-    Risk.WRITE: "yellow",
-    Risk.EXEC: "red",
-}
+
+# How /help groups the commands. Every command must appear in exactly one group; a test
+# checks it, so a new command cannot be forgotten here.
+HELP_GROUPS: tuple[tuple[str, tuple[str, ...]], ...] = (
+    ("Conversation", ("/new", "/sessions", "/resume", "/rename", "/delete", "/compact", "/clear")),
+    ("Memory and plan", ("/memory", "/todo")),
+    ("Settings", ("/settings", "/mode", "/depth", "/thoughts")),
+    ("Model and tools", ("/model", "/tools", "/tool", "/doctor")),
+    ("Export and usage", ("/copy", "/save", "/stats", "/tokens")),
+    ("General", ("/help", "/exit")),
+)
 
 
 def find_command(keyword: str) -> SlashCommand | None:
@@ -104,9 +122,9 @@ def _run_command(name: str, argument: str, context: dict[str, Any], console: Con
         case "/help":
             _show_help(console)
         case "/tools":
-            _show_tools(tools, console)
+            show_tools(tools, console)
         case "/tool":
-            _show_tool_detail(argument, tools, console)
+            show_tool_detail(argument, tools, console)
         case "/copy":
             copy_last_code(context, console)
         case "/save":
@@ -133,74 +151,47 @@ def _run_command(name: str, argument: str, context: dict[str, Any], console: Con
         case "/clear":
             _clear_screen(context, console)
         case "/new":
-            _start_new_conversation(context, console)
+            start_new_session(context, console)
+        case "/sessions":
+            show_sessions(context, console)
+        case "/resume":
+            resume_session(argument, context, console)
+        case "/rename":
+            rename_session(argument, context, console)
+        case "/delete":
+            delete_session(argument, context, console)
+        case "/memory":
+            handle_memory(argument, context, console)
+        case "/todo":
+            show_todo(context, console)
+        case "/compact":
+            compact_conversation(context, console)
 
 
 def _show_help(console: Console) -> None:
-    """Print the slash commands as a two-column list."""
-    table = Table.grid(padding=(0, 3))
-    table.add_column(style=f"bold {CYAN}", no_wrap=True)
-    table.add_column(style="#d0e4ee")
-    for command in SLASH_COMMANDS:
-        aliases = (
-            f" [{MUTED}](or {', '.join(command.aliases)})[/{MUTED}]" if command.aliases else ""
-        )
-        table.add_row(command.usage, command.description + aliases)
-
-    console.print(f"\n[bold {SKY}]Commands[/bold {SKY}]")
-    console.print(table)
+    """Print the slash commands, grouped by what they are for."""
+    by_name = {command.name: command for command in SLASH_COMMANDS}
+    console.print()
+    for title, names in HELP_GROUPS:
+        table = Table.grid(padding=(0, 3))
+        table.add_column(style=f"bold {CYAN}", no_wrap=True, min_width=22)
+        table.add_column(style="#d0e4ee")
+        for command in (by_name[name] for name in names):
+            # Usage hints contain square brackets, which Rich would read as markup.
+            table.add_row(escape(command.usage), command.description + _alias_note(command))
+        console.print(f"[bold {SKY}]{title}[/bold {SKY}]")
+        console.print(table)
+        console.print()
     console.print(
-        f"\n[{MUTED}]Type / to open this list as a menu · "
+        f"[{MUTED}]Type / to open this list as a menu · "
         f"⇧⇥ cycles mode · ^T cycles depth[/{MUTED}]\n"
     )
 
 
-def _show_tools(tools: ToolRegistry, console: Console) -> None:
-    """Display every registered tool with its risk level."""
-    if len(tools) == 0:
-        console.print("[dim]No tools are registered yet. The model can only chat for now.[/dim]")
-        return
-
-    table = Table(
-        title="[bold #70d6ff]AVAILABLE TOOLS[/bold #70d6ff]",
-        border_style="#0077b6",
-        header_style="bold #70d6ff",
-    )
-    table.add_column("Tool", style="bold cyan")
-    table.add_column("Risk", justify="center")
-    table.add_column("Description", style="white")
-
-    for tool in tools:
-        color = _RISK_COLORS[tool.risk]
-        table.add_row(
-            tool.name, f"[bold {color}]{tool.risk.upper()}[/bold {color}]", tool.description
-        )
-
-    console.print(table)
-    console.print("[dim]Tip: type '/tool <name>' for its parameters.[/dim]\n")
-
-
-def _show_tool_detail(name: str, tools: ToolRegistry, console: Console) -> None:
-    """Show the description, risk, and JSON Schema of one tool."""
-    if not name:
-        _show_tools(tools, console)
-        return
-
-    tool = tools.get(name)
-    if tool is None:
-        console.print(f"[bold red]Unknown tool:[/bold red] {name}")
-        return
-
-    schema = json.dumps(tool.spec().parameters, indent=2)
-    console.print(
-        Panel(
-            Syntax(schema, "json", theme="monokai"),
-            title=f"[bold #70d6ff]{tool.name}[/bold #70d6ff] [dim]({tool.risk})[/dim]",
-            subtitle=tool.description,
-            border_style="#0096c7",
-            padding=(0, 1),
-        )
-    )
+def _alias_note(command: SlashCommand) -> str:
+    if not command.aliases:
+        return ""
+    return f" [{MUTED}](or {', '.join(command.aliases)})[/{MUTED}]"
 
 
 def _run_doctor(context: dict[str, Any], console: Console) -> None:
@@ -213,14 +204,6 @@ def _run_doctor(context: dict[str, Any], console: Console) -> None:
         model=context.get("model", DEFAULT_MODEL),
         console=console,
     )
-
-
-def _start_new_conversation(context: dict[str, Any], console: Console) -> None:
-    """Forget the conversation, keeping only the system prompt, and reset the counters."""
-    messages = context.get("messages", [])
-    del messages[1:]
-    context.update(tokens=0, turns=0, speed=0.0, last_reply="")
-    console.print(f"  [bold {CYAN}]✔[/bold {CYAN}] Started a new conversation.")
 
 
 def _clear_screen(context: dict[str, Any], console: Console) -> None:
@@ -256,7 +239,11 @@ def _show_stats(context: dict[str, Any], console: Console) -> None:
     speed = context.get("speed", 0.0)
     avg_tokens = f"{tokens / turns:.1f}" if turns > 0 else "0"
 
+    used, window = context.get("context_used", 0), context.get("context_window", 0)
+    percent, _ = context_meter(used, window)
+
     table.add_row("Conversation Turns", str(turns))
+    table.add_row("Context Used", f"{used:,} of {window:,} tokens ({percent}%)")
     table.add_row("Total Accumulated Tokens", str(tokens))
     table.add_row("Average Tokens / Turn", avg_tokens)
     table.add_row("Latest Generation Speed", f"{speed:.1f} tok/s" if speed > 0 else "N/A")

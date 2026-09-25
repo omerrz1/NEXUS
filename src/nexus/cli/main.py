@@ -17,6 +17,8 @@ from nexus.cli.repl import run_repl
 from nexus.cli.settings import SETTINGS_PATH, Settings, load_settings
 from nexus.guardrails.modes import Mode
 from nexus.loop import Deps
+from nexus.session.memory import SessionMemory
+from nexus.session.store import SessionStore
 from nexus.tools.base import ToolContext
 from nexus.tools.registry import default_registry
 
@@ -65,11 +67,23 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument(
         "--no-anim", action="store_true", help="Disable the animated startup banner."
     )
+    parser.add_argument(
+        "--resume",
+        nargs="?",
+        const="",
+        default=None,
+        metavar="SESSION",
+        help="Continue a saved session: its number or id from /sessions. With no value, "
+        "continues the latest session started in this folder.",
+    )
 
     subparsers = parser.add_subparsers(dest="subcommand", required=False)
     subparsers.add_parser("doctor", help="Run environment and model connectivity diagnostics.")
 
-    return parser.parse_args(argv)
+    args = parser.parse_args(argv)
+    if args.resume is not None and args.prompt is not None:
+        parser.error("--resume works only in the interactive session, not with -p")
+    return args
 
 
 def main(argv: list[str] | None = None) -> None:
@@ -106,16 +120,20 @@ def main(argv: list[str] | None = None) -> None:
         base_url=args.base_url,
         animate_banner=not args.no_anim,
         console=console,
+        store=SessionStore(),
+        resume=args.resume,
     )
 
 
 def _build_deps(brain: OpenAIBrain, console: Console) -> Deps:
     """Wire the agent loop's parts together by hand."""
+    memory = SessionMemory()  # Shared: the memory tools change it, and compaction reads it.
     return Deps(
         brain=brain,
-        tools=default_registry(),
+        tools=default_registry(memory),
         approver=CliApprover(console),
         ctx=ToolContext.for_window(Path.cwd(), brain.context_window),
+        memory=memory,
     )
 
 
